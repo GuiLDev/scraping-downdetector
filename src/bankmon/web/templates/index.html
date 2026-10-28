@@ -1,0 +1,61 @@
+{% extends "base.html" %}
+{% from "_macros.html" import state_badge, demo_badge %}
+{% block title %}Painel{% endblock %}
+{% block content %}
+<section class="summary" aria-label="Resumo da verificação">
+  <p><strong>Última verificação válida:</strong> {{ header.last_ok }}</p>
+  <p><strong>Próxima verificação prevista:</strong> {{ header.next }}</p>
+  <ul class="counts" aria-label="Contagem por estado">
+    {% for label, css, n in counts %}
+    <li class="count {{ css }}"><span class="count-n">{{ n }}</span> {{ label }}</li>
+    {% endfor %}
+  </ul>
+</section>
+
+<section class="filters" aria-label="Filtros">
+  <div class="filter-group" role="group" aria-label="Categoria">
+    <span class="filter-label">Categoria:</span>
+    {% for value, label in category_options %}
+    <a class="chip{% if filters.category == value %} chip-active{% endif %}"
+       href="{{ url_for('index', category=value or None, state=filters.state or None, q=filters.q or None) }}"
+       {% if filters.category == value %}aria-current="true"{% endif %}>{{ label }}</a>
+    {% endfor %}
+  </div>
+  <div class="filter-group" role="group" aria-label="Status">
+    <span class="filter-label">Status:</span>
+    {% for value, label in state_options %}
+    <a class="chip{% if filters.state == value %} chip-active{% endif %}"
+       href="{{ url_for('index', category=filters.category or None, state=value or None, q=filters.q or None) }}"
+       {% if filters.state == value %}aria-current="true"{% endif %}>{{ label }}</a>
+    {% endfor %}
+  </div>
+  <form class="filter-group" method="get" action="{{ url_for('index') }}" role="search">
+    <label for="q" class="filter-label">Instituição:</label>
+    <input type="search" id="q" name="q" maxlength="60" value="{{ filters.q }}" placeholder="Buscar pelo nome">
+    {% if filters.category %}<input type="hidden" name="category" value="{{ filters.category }}">{% endif %}
+    {% if filters.state %}<input type="hidden" name="state" value="{{ filters.state }}">{% endif %}
+    <button type="submit">Buscar</button>
+  </form>
+</section>
+
+{% for section in sections %}
+<section class="status-section section-{{ section.key }}" aria-labelledby="sec-{{ section.key }}">
+  <h2 id="sec-{{ section.key }}">{{ section.title }} <span class="section-count">({{ section.count }})</span></h2>
+  {% if not section.blocks %}
+  <p class="muted">Nenhuma instituição nesta seção.</p>
+  {% endif %}
+  {% for block in section.blocks %}
+  <h3 class="block-title">{{ block.category }} <small class="muted">· {{ block.state_label }}</small></h3>
+  <div class="cards">
+    {% for c in block.cards %}
+    <article class="card {{ c.css }}">
+      <h4 class="card-name"><a href="{{ url_for('institution', institution_id=c.id) }}">{{ c.name }}</a></h4>
+      <p class="card-state">{{ state_badge(c.css, c.icon, c.label) }}{% if c.demo %} {{ demo_badge() }}{% endif %}</p>
+      <p class="card-since muted">{% if c.since %}desde {{ c.since }}{% else %}&nbsp;{% endif %}</p>
+    </article>
+    {% endfor %}
+  </div>
+  {% endfor %}
+</section>
+{% endfor %}
+{% endblock %}

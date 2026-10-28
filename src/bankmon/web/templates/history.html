@@ -1,0 +1,45 @@
+{% extends "base.html" %}
+{% from "_macros.html" import transitions_table, demo_badge %}
+{% block title %}Histórico{% endblock %}
+{% block content %}
+<h1>Histórico {% if demo %}{{ demo_badge() }}{% endif %}</h1>
+<nav class="period-nav" aria-label="Período">
+  {% for p in periods %}
+  <a class="chip{% if p == period %} chip-active{% endif %}" href="{{ url_for('history', period=p) }}"{% if p == period %} aria-current="page"{% endif %}>{{ p }}</a>
+  {% endfor %}
+</nav>
+
+<section aria-labelledby="h-chart">
+  <h2 id="h-chart">Instituições em Atenção ou Crítico por hora</h2>
+  {% if no_hours_with_data %}
+  <p class="muted">Nenhuma verificação válida no período: todas as horas aparecem como Sem dados.</p>
+  {% endif %}
+  <div class="chart-box"><canvas id="history-chart" role="img" aria-label="Gráfico de barras empilhadas: instituições em Atenção e Crítico por hora; horas sem verificação válida aparecem em cinza como Sem dados"></canvas></div>
+  <p class="muted"><small>Barras cinzas indicam horas sem verificação válida (Sem dados), não ausência de alertas.</small></p>
+  <script type="application/json" id="history-data">{{ chart|tojson }}</script>
+</section>
+
+<section aria-labelledby="h-trans">
+  <h2 id="h-trans">Transições de estado</h2>
+  {{ transitions_table(transitions) }}
+</section>
+
+<section aria-labelledby="h-fail">
+  <h2 id="h-fail">Execuções com falha</h2>
+  {% if failed %}
+  <div class="table-wrap">
+  <table class="striped">
+    <thead><tr><th scope="col">Quando</th><th scope="col">Coletor</th><th scope="col">Situação</th><th scope="col">Detalhe</th></tr></thead>
+    <tbody>
+    {% for f in failed %}
+      <tr><td>{{ f.when }}</td><td>{{ f.collector }}{% if f.demo %} {{ demo_badge() }}{% endif %}</td><td>{{ f.status }}</td><td>{{ f.detail }}</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  {% else %}
+  <p class="muted">Nenhuma execução com falha no período.</p>
+  {% endif %}
+</section>
+{% endblock %}
+{% block scripts %}<script src="{{ url_for('static', filename='vendor/chartjs/chart.umd.min.js') }}"></script>{% endblock %}

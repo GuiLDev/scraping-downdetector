@@ -1,0 +1,35 @@
+{% macro state_badge(css, icon, label) -%}
+<span class="state-badge {{ css }}"><span class="state-icon" aria-hidden="true">{{ icon }}</span><span class="state-text">{{ label }}</span></span>
+{%- endmacro %}
+
+{% macro notices_block(notices) -%}
+{% for n in notices %}
+<p class="notice notice-{{ n.kind }}" role="status">{{ n.text }}{% if n.detail %} <small class="notice-detail">{{ n.detail }}</small>{% endif %}</p>
+{% endfor %}
+{%- endmacro %}
+
+{% macro demo_badge() -%}
+<span class="demo-badge" title="Dados de demonstração">DEMO</span>
+{%- endmacro %}
+
+{% macro transitions_table(rows, show_institution=True) -%}
+{% if rows %}
+<div class="table-wrap">
+<table class="striped">
+  <thead><tr><th scope="col">Quando</th>{% if show_institution %}<th scope="col">Instituição</th>{% endif %}<th scope="col">De</th><th scope="col">Para</th></tr></thead>
+  <tbody>
+  {% for t in rows %}
+    <tr>
+      <td>{{ t.when }}</td>
+      {% if show_institution %}<td><a href="{{ url_for('institution', institution_id=t.id) }}">{{ t.name }}</a></td>{% endif %}
+      <td>{{ state_badge(t.from_css, t.from_icon, t.from_label) }}</td>
+      <td>{{ state_badge(t.to_css, t.to_icon, t.to_label) }}</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+{% else %}
+<p class="muted">Nenhuma transição de estado no período.</p>
+{% endif %}
+{%- endmacro %}

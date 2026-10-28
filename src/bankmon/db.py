@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sqlite3
 from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Iterator, Sequence
@@ -196,3 +197,101 @@ def insert_transitions(
         "VALUES (?, ?, ?, ?, ?)",
         [(iid, run_id, frm, to, to_iso(changed_at)) for iid, frm, to in transitions],
     )
+
+
+# --- Consultas de leitura do dashboard ----------------------------------------
+
+
+@dataclass(frozen=True)
+class TransitionRow:
+    institution_id: str
+    from_state: str
+    to_state: str
+    changed_at: datetime
+    run_id: int
+
+
+@dataclass(frozen=True)
+class FailedRun:
+    run_id: int
+    finished_at: datetime
+    collector: str
+    source_status: str
+    is_demo: bool
+    error_detail: str | None
+
+
+def open_readonly(path: Path) -> sqlite3.Connection:
+    """Conexao SOMENTE LEITURA (mode=ro + query_only) para o dashboard.
+
+    Levanta `sqlite3.OperationalError` se o arquivo nao existir (nao cria nada).
+    """
+    conn = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True, timeout=5)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA query_only = ON")
+    return conn
+
+
+def run_before(conn: sqlite3.Connection, moment: datetime) -> RunView | None:
+    """Ultima execucao (qualquer status) com finished_at estritamente antes de `moment`."""
+    row = conn.execute(
+        "SELECT * FROM runs WHERE finished_at < ? ORDER BY finished_at DESC, id DESC LIMIT 1",
+        (to_iso(moment),),
+    ).fetchone()
+    return _run_view(conn, row) if row else None
+
+
+def _transition_row(r: sqlite3.Row) -> TransitionRow:
+    return TransitionRow(
+        r["institution_id"], r["from_state"], r["to_state"], from_iso(r["changed_at"]), r["run_id"]
+    )
+
+
+def last_transition_by_institution(conn: sqlite3.Connection) -> dict[str, TransitionRow]:
+    """Transicao mais recente de cada instituicao (base do "desde HH:MM")."""
+    rows = conn.execute(
+        "SELECT t.* FROM state_transitions t WHERE t.id = ("
+        "SELECT id FROM state_transitions WHERE institution_id = t.institution_id "
+        "ORDER BY changed_at DESC, id DESC LIMIT 1)"
+    ).fetchall()
+    return {r["institution_id"]: _transition_row(r) for r in rows}
+
+
+def transitions_between(
+    conn: sqlite3.Connection,
+    start: datetime,
+    end: datetime,
+    institution_id: str | None = None,
+    limit: int = 500,
+) -> list[TransitionRow]:
+    """Transicoes com changed_at em [start, end], da mais recente para a mais antiga."""
+    sql = "SELECT * FROM state_transitions WHERE changed_at >= ? AND changed_at <= ?"
+    params: list[object] = [to_iso(start), to_iso(end)]
+    if institution_id is not None:
+        sql += " AND institution_id = ?"
+        params.append(institution_id)
+    sql += " ORDER BY changed_at DESC, id DESC LIMIT ?"
+    params.append(limit)
+    return [_transition_row(r) for r in conn.execute(sql, params)]
+
+
+def failed_runs_between(
+    conn: sqlite3.Connection, start: datetime, end: datetime, limit: int = 200
+) -> list[FailedRun]:
+    """Execucoes com source_status != ok em [start, end], da mais recente para a mais antiga."""
+    rows = conn.execute(
+        "SELECT * FROM runs WHERE source_status != 'ok' AND finished_at >= ? AND finished_at <= ? "
+        "ORDER BY finished_at DESC, id DESC LIMIT ?",
+        (to_iso(start), to_iso(end), limit),
+    ).fetchall()
+    return [
+        FailedRun(
+            r["id"],
+            from_iso(r["finished_at"]),
+            r["collector"],
+            r["source_status"],
+            bool(r["is_demo"]),
+            r["error_detail"],
+        )
+        for r in rows
+    ]

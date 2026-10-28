@@ -44,21 +44,26 @@ log = logging.getLogger("bankmon")
 
 
 def setup_logging(cfg: Config) -> None:
-    """Log rotativo em data/logs/bankmon.log e em stderr (reconfigura sem duplicar)."""
+    """Log rotativo em data/logs/bankmon.log e em stderr (reconfigura sem duplicar).
+
+    Sem console (pythonw.exe, Agendador de Tarefas) sys.stderr e None: so o arquivo.
+    """
     cfg.log_dir.mkdir(parents=True, exist_ok=True)
     fmt = logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
-    file_handler = RotatingFileHandler(
-        cfg.log_dir / "bankmon.log", maxBytes=1_000_000, backupCount=5, encoding="utf-8"
-    )
-    stream_handler = logging.StreamHandler(sys.stderr)
-    for handler in (file_handler, stream_handler):
-        handler.setFormatter(fmt)
+    handlers: list[logging.Handler] = [
+        RotatingFileHandler(
+            cfg.log_dir / "bankmon.log", maxBytes=1_000_000, backupCount=5, encoding="utf-8"
+        )
+    ]
+    if sys.stderr is not None:
+        handlers.append(logging.StreamHandler(sys.stderr))
     root = logging.getLogger("bankmon")
     for old in list(root.handlers):
         root.removeHandler(old)
         old.close()
-    root.addHandler(file_handler)
-    root.addHandler(stream_handler)
+    for handler in handlers:
+        handler.setFormatter(fmt)
+        root.addHandler(handler)
     root.setLevel(logging.INFO)
     root.propagate = False
 
@@ -179,7 +184,20 @@ def cmd_backup(cfg: Config, args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def cmd_serve(cfg: Config, args: argparse.Namespace) -> int:
+    """Sobe o dashboard (waitress) em cfg.host:cfg.port (loopback validado em load_config)."""
+    import waitress
+
+    from bankmon.web import create_app
+
+    host = f"[{cfg.host}]" if ":" in cfg.host else cfg.host  # IPv6 literal na URL
+    print(f"Dashboard em http://{host}:{cfg.port}/  (Ctrl+C para encerrar)", flush=True)
+    waitress.serve(create_app(cfg), host=cfg.host, port=cfg.port, threads=4)
+    return EXIT_OK
+
+
 COMMANDS = {
+    "serve": cmd_serve,
     "init-db": cmd_init_db,
     "check-config": cmd_check_config,
     "collect": cmd_collect,
@@ -192,6 +210,7 @@ COMMANDS = {
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="bankmon", description="Downdetector Banking Monitor")
     sub = parser.add_subparsers(dest="command", required=True)
+    sub.add_parser("serve", help="sobe o dashboard em server.host:server.port (somente loopback)")
     sub.add_parser("init-db", help="cria o banco e sincroniza o TOML")
     sub.add_parser("check-config", help="valida o TOML")
     collect = sub.add_parser("collect", help="executa uma coleta")

@@ -1,0 +1,39 @@
+<!doctype html>
+{% from "_macros.html" import notices_block %}
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="refresh" content="300">
+  <meta name="color-scheme" content="light dark">
+  <title>{% block title %}Painel{% endblock %} · Monitor de instituições financeiras</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='vendor/pico/pico.min.css') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='app.css') }}">
+</head>
+<body>
+  <a class="skip-link" href="#conteudo">Ir para o conteúdo</a>
+  {% if demo %}
+  <div class="demo-banner" role="alert">{{ DEMO_BANNER }}</div>
+  {% endif %}
+  <header class="container">
+    <nav class="topnav" aria-label="Principal">
+      <ul><li><strong>Monitor de instituições financeiras</strong></li></ul>
+      <ul>
+        <li><a href="{{ url_for('index') }}"{% if request.endpoint == 'index' %} aria-current="page"{% endif %}>Painel</a></li>
+        <li><a href="{{ url_for('history') }}"{% if request.endpoint == 'history' %} aria-current="page"{% endif %}>Histórico</a></li>
+        <li><button type="button" class="outline secondary theme-toggle" id="theme-toggle" aria-label="Alternar tema claro/escuro">Tema</button></li>
+      </ul>
+    </nav>
+  </header>
+  <main class="container" id="conteudo">
+    <p class="notice notice-disclaimer">{{ DISCLAIMER }}</p>
+    {% if notices is defined %}{{ notices_block(notices) }}{% endif %}
+    {% block content %}{% endblock %}
+  </main>
+  <footer class="container">
+    <small>Atualização automática a cada 5 minutos. Horários em America/Sao_Paulo.</small>
+  </footer>
+  {% block scripts %}{% endblock %}
+  <script src="{{ url_for('static', filename='app.js') }}"></script>
+</body>
+</html>

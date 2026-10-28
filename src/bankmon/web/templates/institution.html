@@ -1,0 +1,39 @@
+{% extends "base.html" %}
+{% from "_macros.html" import state_badge, transitions_table, demo_badge %}
+{% block title %}{{ info.name }}{% endblock %}
+{% block content %}
+<p><a href="{{ url_for('index') }}">&larr; Voltar ao painel</a></p>
+<h1>{{ info.name }} {% if demo %}{{ demo_badge() }}{% endif %}</h1>
+<p class="muted">{{ info.category_name }} · Estado atual: {{ state_badge(current.css, current.icon, current.label) }}</p>
+
+<nav class="period-nav" aria-label="Período">
+  {% for p in periods %}
+  <a class="chip{% if p == period %} chip-active{% endif %}" href="{{ url_for('institution', institution_id=info.id, period=p) }}"{% if p == period %} aria-current="page"{% endif %}>{{ p }}</a>
+  {% endfor %}
+</nav>
+
+<section aria-labelledby="i-chart">
+  <h2 id="i-chart">Linha do tempo</h2>
+  <div class="chart-box chart-box-timeline"><canvas id="timeline-chart" role="img" aria-label="Linha do tempo de estados de {{ info.name }}; a tabela abaixo traz os mesmos dados em texto"></canvas></div>
+  <script type="application/json" id="timeline-data">{{ chart|tojson }}</script>
+  <details>
+    <summary>Ver períodos em texto</summary>
+    <div class="table-wrap">
+    <table class="striped">
+      <thead><tr><th scope="col">Estado</th><th scope="col">De</th><th scope="col">Até</th></tr></thead>
+      <tbody>
+      {% for s in segments %}
+        <tr><td>{{ state_badge(s.css, s.icon, s.label) }}</td><td>{{ s.start }}</td><td>{{ s.end }}</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    </div>
+  </details>
+</section>
+
+<section aria-labelledby="i-trans">
+  <h2 id="i-trans">Transições</h2>
+  {{ transitions_table(transitions, show_institution=False) }}
+</section>
+{% endblock %}
+{% block scripts %}<script src="{{ url_for('static', filename='vendor/chartjs/chart.umd.min.js') }}"></script>{% endblock %}
