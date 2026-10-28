@@ -1,0 +1,9 @@
+# Assets de terceiros: bytes exatos (SHA-256 conferido em VENDORED.md e nos testes).
+src/bankmon/web/static/vendor/** -text
+
+# Units do systemd sao usadas no Linux: sempre LF, mesmo em clone no Windows.
+scripts/linux/*.service text eol=lf
+scripts/linux/*.timer text eol=lf
+
+# cmd.exe espera CRLF.
+*.cmd text eol=crlf
