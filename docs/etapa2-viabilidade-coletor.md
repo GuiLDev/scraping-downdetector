@@ -20,7 +20,26 @@ Requisições HTTP simples, sem simular navegador:
 - A ferramenta de leitura web dos agentes também foi recusada em `downdetector.com`, `downdetector.com.br`, `ookla.com` e `web.archive.org`.
 - **Os termos de uso não puderam ser lidos por automação e não foram verificados.**
 - O Downdetector oferece uma **API Enterprise**: o cliente entra no portal e usa as credenciais da API, segundo a documentação de integração da Sumo Logic. O preço é sob cotação.
-- A informação de que o controle da Ookla mudou em 2026 (aquisição pela Accenture) vem de fontes secundárias e **não foi verificada**. Isso pode mudar o canal de licenciamento.
+- **Proprietário atual:** a Accenture **concluiu em 17/06/2026** a aquisição da Ookla, dona do Downdetector e do Speedtest, e de outras marcas da divisão Connectivity da Ziff Davis. A operação tinha sido anunciada em 03/03/2026. Fontes oficiais em "Referências".
+  - A troca de dono **não altera automaticamente os termos de uso** do Downdetector **nem concede autorização** para coleta automatizada. Valem os termos publicados hoje, que precisam ser lidos (T1). Qualquer permissão tem de vir por escrito do titular atual.
+
+## T1: `robots.txt` (lido pelo responsável no navegador, 2026-10-28)
+
+`https://downdetector.com.br/robots.txt`:
+
+```
+User-Agent: *
+Allow: /ads.txt
+Disallow: /search/?q=*
+Disallow: /
+```
+
+Seguem-se exceções nominais com `Allow: /`: buscadores (Googlebot, bingbot, DuckDuckBot etc.) e crawlers de IA (GPTBot, ClaudeBot etc.).
+
+- **Um coletor próprio cai em `User-Agent: *`, e todo o site está vetado para ele, inclusive a página inicial.**
+- As exceções valem só para os serviços nomeados. Usar o user-agent de um deles seria falsificação, proibida neste projeto.
+- **Resultado:** pelo critério de parada do T1, nenhum teste automatizado será feito. O caminho é a permissão por escrito. O T2 fica adiado até haver permissão.
+- Os termos de uso ainda não foram lidos (pendente).
 
 ## Por que sessão e Cookie Jar não resolvem
 
@@ -29,8 +48,12 @@ Um Cookie Jar (`httpx.Client`, `http.cookiejar`) guarda e reenvia os cookies que
 Aqui ele não resolve:
 
 1. **O bloqueio vem antes de qualquer sessão.** O `403 challenge` é a primeira resposta. O cookie de liberação (`cf_clearance`) só é emitido depois que um navegador resolve o desafio. Sem esse passo, não há o que guardar.
-2. **O cookie é preso ao cliente que resolveu o desafio:** user-agent e, em geral, IP e assinatura TLS/HTTP. Reutilizado por outro cliente, ele é rejeitado ou dispara um novo desafio.
-3. **O cookie expira.** O prazo é definido pelo site; no Cloudflare, o padrão do "Challenge Passage" é de 30 min. Renovar exigiria uma pessoa resolvendo o desafio de novo, o que é incompatível com coleta horária sem supervisão.
+2. **O cookie é preso a quem resolveu o desafio.** A documentação da Cloudflare diz que ele é ligado ao "visitante e dispositivo". Quais sinais exatamente (user-agent, IP, assinatura TLS) é **inferência nossa, não confirmada**. A Cloudflare também pode desafiar de novo antes do vencimento se a sessão parecer suspeita.
+3. **Validade e renovação.**
+   - A validade é configurada pelo site. O padrão da Cloudflare ("Challenge Passage") é de 30 min, mas esse é **apenas o valor padrão configurável**. A validade usada pelo Downdetector **não é conhecida**.
+   - Numa sessão legítima de navegador, a renovação **pode ocorrer sem interação humana**: a Cloudflare pode rodar verificações não interativas no próprio navegador e atualizar a liberação durante a sessão.
+   - Isso **não garante** que um Cookie Jar funcione em outro cliente HTTP, que não executa essas verificações e não é o "visitante e dispositivo" liberado.
+   - A viabilidade de uma sessão automatizada contínua (coleta horária sem supervisão) **não foi demonstrada**. Este item descreve hipóteses e limites conhecidos, não fatos testados no Downdetector.
 4. **Exportar o cookie do navegador para um script, ou automatizar um navegador para obtê-lo, é contornar a proteção:** um passe emitido para uma pessoa passa a ser usado por um robô. **Não será implementado.**
 
 **Conclusão:** sessão e Cookie Jar só serão usados *dentro* de um canal já autorizado, por exemplo para manter um token de API. Eles não são um caminho de autorização.
@@ -73,3 +96,9 @@ Essas regras também estão em `.claude/agents/scraping-specialist.md`.
 - Documentação de integração Sumo Logic × Downdetector (API Enterprise): https://www.sumologic.com/help/docs/integrations/automation-integrations/downdetector/
 - Biblioteca não oficial `downdetector-api`. **Não usar:** é citada só como evidência de que o Cloudflare bloqueia clientes automatizados. https://github.com/DavideViolante/downdetector-api
 - Cloudflare, Challenge Passage: https://developers.cloudflare.com/waf/tools/challenge-passage/
+
+### Aquisição da Ookla pela Accenture (fontes oficiais)
+
+- Accenture Newsroom, comunicado de 03/03/2026 com a nota "This acquisition closed on June 17, 2026": https://newsroom.accenture.com/news/2026/accenture-to-acquire-ookla-to-strengthen-network-intelligence-and-experience-with-data-and-ai-for-enterprises
+- Ziff Davis, comunicado da venda da divisão Connectivity (Business Wire). A nota de conclusão neste link não foi conferida, porque a página bloqueou a leitura automatizada. A conclusão está confirmada pelas outras duas fontes: https://www.businesswire.com/news/home/20260302093984/en/Ziff-Davis-Announces-Definitive-Agreement-to-Sell-Connectivity-Division-to-Accenture
+- Ziff Davis, Form 10-Q do trimestre encerrado em 30/06/2026 (SEC): https://www.sec.gov/Archives/edgar/data/0001084048/000108404826000046/zd-20260630.htm
