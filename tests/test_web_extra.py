@@ -65,7 +65,7 @@ def section_counts(html):
 def test_counters_match_cards(seeded):
     html = page(client_for(seeded))
     c = count_items(html)
-    assert c == {"Crítico": 1, "Atenção": 1, "Sem alerta": 1, "Sem dados": 0, "Não monitorado": 1}
+    assert c == {"Crítico": 1, "Atenção": 1, "Sem alerta": 1, "Sem dados": 1, "Não monitorado": 0}
     assert sum(c.values()) == len(cards(html)) == 4
     assert section_counts(html) == [2, 1, 1]
 
@@ -86,7 +86,8 @@ def test_counters_are_global_while_sections_follow_filters(seeded):
         ("category=bogus&state=attention&q=", ["Banco Beta"]),
         ("q=%20%20banco%20%20gama%20", ["Banco Gama"]),  # espacos normalizados
         ("q=BANCO", ["Banco Alfa", "Banco Beta", "Banco Gama", "Banco Delta"]),
-        ("state=not_monitored", ["Banco Delta"]),
+        ("state=not_monitored", []),  # ausente da pagina agora e "Sem dados"
+        ("state=no_data", ["Banco Delta"]),
     ],
 )
 def test_filter_combinations(seeded, qs, expected):

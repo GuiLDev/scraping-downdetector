@@ -84,8 +84,8 @@ Variáveis de ambiente (opcionais, sem segredos; veja `.env.example`):
 | Crítico | O Downdetector indica problema crítico para a instituição. |
 | Atenção | O Downdetector indica sinais de problema. |
 | Sem alerta | Coleta válida e recente, sem alerta para a instituição. |
-| Sem dados | Não há coleta válida e recente (fonte falhou ou dado vencido), ou a instituição não veio na coleta. |
-| Não monitorado | A instituição não está listada no Downdetector. |
+| Sem dados | Não há coleta válida e recente (fonte falhou ou dado vencido), a instituição não veio na coleta, ou ela está configurada mas **não aparece na página inicial** do Downdetector (não listada). Ausência nunca significa normalidade. |
+| Não monitorado | Reservado para o que está fora do escopo de monitoramento; não é usado para instituição ausente da página. |
 
 Regras:
 

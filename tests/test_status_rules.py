@@ -42,7 +42,7 @@ def rv(finished_at, status="ok", levels=None, run_id=1):
         ("no_alert", NO_ALERT),
         ("attention", ATTENTION),
         ("critical", CRITICAL),
-        ("not_listed", NOT_MONITORED),
+        ("not_listed", NO_DATA),  # ausente da pagina: sem dados, nunca normal
     ],
 )
 @pytest.mark.parametrize(
@@ -65,7 +65,7 @@ def test_not_listed_expired_is_no_data_not_not_monitored():
     latest = rv(NOW - timedelta(minutes=91), levels={"x": "not_listed"})
     assert effective_state("x", latest, NOW, STALE) == NO_DATA
     fresh = rv(NOW - timedelta(minutes=10), levels={"x": "not_listed"})
-    assert effective_state("x", fresh, NOW, STALE) == NOT_MONITORED
+    assert effective_state("x", fresh, NOW, STALE) == NO_DATA
 
 
 def test_deadline_follows_configured_value():
@@ -153,13 +153,13 @@ def test_institution_added_to_toml_after_last_run_is_no_data(cfg, write_config):
     assert got == {"inst-1": NO_ALERT, "inst-2": NO_ALERT, "inst-3": NO_DATA}
 
 
-def test_not_listed_end_to_end_is_not_monitored_then_expires(cfg):
+def test_not_listed_end_to_end_is_no_data_then_expires(cfg):
     runner.run_collection(
         cfg,
         "cli",
         collector=FakeCollector(levels={"inst-1": "not_listed", "inst-2": "no_alert"}, at=T0),
     )
-    assert _states(cfg, T0 + timedelta(minutes=30)) == {"inst-1": NOT_MONITORED, "inst-2": NO_ALERT}
+    assert _states(cfg, T0 + timedelta(minutes=30)) == {"inst-1": NO_DATA, "inst-2": NO_ALERT}
     assert _states(cfg, T0 + timedelta(minutes=91)) == {"inst-1": NO_DATA, "inst-2": NO_DATA}
 
 

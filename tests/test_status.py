@@ -49,7 +49,7 @@ def test_levels_mapping_and_missing_observation():
     )
     assert effective_state("c", latest, NOW, STALE) == CRITICAL
     assert effective_state("a", latest, NOW, STALE) == ATTENTION
-    assert effective_state("n", latest, NOW, STALE) == NOT_MONITORED
+    assert effective_state("n", latest, NOW, STALE) == NO_DATA  # ausente da pagina: sem dados
     assert effective_state("g", latest, NOW, STALE) == NO_ALERT
     assert effective_state("ausente", latest, NOW, STALE) == NO_DATA
 

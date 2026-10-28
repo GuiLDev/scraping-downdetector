@@ -204,8 +204,8 @@ def test_not_listed_transition_and_missing_observation(cfg):
     out = runner.run_collection(
         cfg, "cli", collector=FakeCollector(levels={"inst-1": "not_listed"}, at=T0)
     )
-    # inst-2 sem observacao continua no_data: sem transicao
-    assert transitions(cfg, out.run_id) == [("inst-1", "no_data", "not_monitored")]
+    # not_listed (ausente da pagina) e no_data: sem transicao, como inst-2 sem observacao
+    assert transitions(cfg, out.run_id) == []
 
 
 def test_transition_rows_reference_run_and_use_utc_iso(cfg):

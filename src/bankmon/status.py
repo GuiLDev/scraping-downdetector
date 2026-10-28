@@ -8,7 +8,9 @@ Regras:
   2. Se nao ha execucao ou now - finished_at > stale_after -> `no_data`
      (exatamente stale_after ainda vale).
   3. Senao usa a observacao da instituicao: ausente -> `no_data`;
-     `not_listed` -> `not_monitored`; demais niveis mapeados diretamente.
+     `not_listed` (configurada, mas fora da pagina da fonte) -> `no_data`, nunca normalidade;
+     demais niveis mapeados diretamente. `not_monitored` fica reservado para o que esta fora
+     do escopo de monitoramento, nao para ausencia na pagina.
   4. Nunca `no_alert` sem execucao valida.
 """
 
@@ -30,7 +32,7 @@ LEVEL_TO_STATE = {
     "critical": CRITICAL,
     "attention": ATTENTION,
     "no_alert": NO_ALERT,
-    "not_listed": NOT_MONITORED,
+    "not_listed": NO_DATA,  # ausente da pagina: sem dados (o fato bruto fica em observations)
 }
 
 SECTION_ALERTS = "alerts"

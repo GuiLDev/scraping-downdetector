@@ -36,14 +36,14 @@ id = "infraestrutura"
 name = "Infraestrutura"
 order = 4
 
-# dd_label: nome como aparece no Downdetector. Os valores abaixo sao
-# provisorios e serao confirmados na Etapa 2.
+# dd_label: nome exato do servico no Downdetector (aria-label do grafico).
+# Itau e Caixa confirmados no HTML real exportado em 2026-10-28; os demais seguem provisorios.
 
 [[institutions]]
 id = "itau"
 name = "Itaú"
 category = "tradicionais"
-dd_label = "Itaú"
+dd_label = "Banco Itaú"
 enabled = true
 
 [[institutions]]
@@ -71,7 +71,7 @@ enabled = true
 id = "caixa"
 name = "Caixa"
 category = "tradicionais"
-dd_label = "Caixa"
+dd_label = "Caixa Econômica Federal"
 enabled = true
 
 [[institutions]]
