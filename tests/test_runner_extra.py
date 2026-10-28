@@ -454,3 +454,95 @@ def test_latest_run_orders_by_id_not_finished_at(cfg):
         assert dbm.latest_ok_run(conn).source_status == "ok"
     finally:
         conn.close()
+
+
+# --- SEC-009: validacao de tipos --------------------------------------------------
+
+
+def _run_bad(cfg, **overrides):
+    class Bad(FakeCollector):
+        def collect(self, institutions):
+            base = dict(
+                collector="fake", is_demo=True, started_at=T0, finished_at=T0,
+                source_status="ok", observations=(), error_detail=None,
+            )
+            base.update(overrides)
+            return CollectionResult(**base)
+
+    return runner.run_collection(cfg, "cli", now=T0, collector=Bad())
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"collector": 123},
+        {"collector": "outro"},
+        {"is_demo": 1},
+        {"is_demo": "True"},
+        {"started_at": "2026-10-28"},
+        {"finished_at": 5},
+        {"source_status": 7},
+        {"error_detail": 42},
+        {"observations": None},
+        {"observations": "abc"},
+        {"observations": (object(),)},
+        {"observations": (Observation(1, "no_alert"),)},
+        {"observations": (Observation("inst-1", None),)},
+        {"observations": (Observation("inst-1", "no_alert", 99),)},
+        {"observations": ({"institution_id": "inst-1"},)},
+    ],
+)
+def test_wrong_types_become_error_run_never_traceback(cfg, overrides):
+    out = _run_bad(cfg, **overrides)
+    assert out.result.source_status == "error"
+    assert out.result.collector == "demo" or out.result.collector == "fake"
+    assert out.result.is_demo is True
+    assert db_rows(cfg, "SELECT source_status, is_demo FROM runs") == [("error", 1)]
+    assert db_rows(cfg, "SELECT COUNT(*) FROM observations") == [(0,)]
+
+
+def test_validation_exception_becomes_error_run(cfg):
+    class Weird:
+        def __bool__(self):
+            raise RuntimeError("boom")
+
+    out = _run_bad(cfg, observations=(Observation("inst-1", "no_alert", Weird()),))
+    assert out.result.source_status == "error"
+    assert db_rows(cfg, "SELECT source_status FROM runs") == [("error",)]
+
+
+def test_detail_and_error_detail_are_sanitized_and_truncated(cfg):
+    out = _run_bad(
+        cfg,
+        error_detail="x" * 1000,
+        observations=(Observation("inst-1", "no_alert", "ok token=SEGREDO1 " + "y" * 1000),),
+    )
+    assert out.result.source_status == "ok"
+    assert len(out.result.error_detail) <= 300
+    detail = db_rows(cfg, "SELECT detail FROM observations")[0][0]
+    assert len(detail) <= 300 and "SEGREDO" not in detail
+
+
+def test_collector_name_must_match_active_collector(cfg):
+    # sem injecao do nome esperado (record_result direto), vale cfg.collector ("demo")
+    from bankmon import db as dbm
+
+    conn = dbm.open_db(cfg)
+    try:
+        res = CollectionResult("fake", True, T0, T0, "ok")
+        out = runner.record_result(conn, cfg, res, "cli", lambda: T0)
+        assert out.result.source_status == "error" and out.result.collector == "demo"
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize("returned", [None, {"collector": "fake"}, "ok"])
+def test_collector_returning_non_result_is_recorded_as_error(cfg, returned):
+    class Broken(FakeCollector):
+        def collect(self, institutions):
+            return returned
+
+    out = runner.run_collection(cfg, "cli", now=T0, collector=Broken())
+    assert out.result.source_status == "error"
+    assert "CollectionResult" in out.result.error_detail
+    assert db_rows(cfg, "SELECT source_status FROM runs") == [("error",)]

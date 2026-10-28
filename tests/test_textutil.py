@@ -42,3 +42,86 @@ def test_collector_exception_detail_is_sanitized_in_db(cfg):
     assert out.result.source_status == "error"
     assert "zzz" not in out.result.error_detail and "u:p" not in out.result.error_detail
     assert "\x1b" not in out.result.error_detail
+
+
+# --- SEC-007: redacao, ReDoS, Unicode ---------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "{'api_key': 'SEGREDO1'}",
+        '{"Authorization": "Bearer SEGREDO1"}',
+        "Authorization: Basic SEGREDO1abc=",
+        "falha com Bearer SEGREDO1xyz no meio",
+        "refresh_token=SEGREDO1",
+        "client_secret=SEGREDO1",
+        "auth_token=SEGREDO1",
+        "https://user:SEGREDO1@x@host.example/p",
+        "Cookie: sid=SEGREDO1; outro=SEGREDO2",
+        "Set-Cookie: sid=SEGREDO1",
+        "Basic dXNlcjpTRUdSRURPMQ==",
+    ],
+)
+def test_secret_variants_do_not_leak(raw):
+    out = safe_text(raw)
+    assert "SEGREDO" not in out and "dXNlcjp" not in out
+
+
+def test_plain_words_are_kept():
+    out = safe_text("erro basic authentication ao consultar")
+    assert out == "erro basic authentication ao consultar"
+
+
+@pytest.mark.parametrize(
+    "payload", ["a" * 100_000, "http://" * 20_000, "token=" * 20_000, "a@" * 50_000, "x" * 50_000 + "://"]
+)
+def test_large_input_is_fast(payload):
+    import time
+
+    t0 = time.perf_counter()
+    out = safe_text(payload)
+    assert time.perf_counter() - t0 < 0.5
+    assert len(out) <= MAX_LEN
+
+
+def test_unicode_invisibles_removed():
+    out = safe_text("ok‮gnp.exe​  fim\u0085")
+    for ch in ("‮", "​", " ", " ", "\u0085"):
+        assert ch not in out
+    assert out.startswith("okgnp.exe")
+
+
+def test_runner_log_does_not_leak_secret(cfg, caplog):
+    from bankmon import runner
+    from conftest import FakeCollector, T0
+
+    class Boom(FakeCollector):
+        def collect(self, institutions):
+            raise RuntimeError("falhou token=SEGREDO1 https://u:SEGREDO2@h/x?k=SEGREDO3")
+
+    with caplog.at_level("DEBUG", logger="bankmon.runner"):
+        runner.run_collection(cfg, "cli", now=T0, collector=Boom())
+    assert "SEGREDO" not in caplog.text
+    assert "Coletor fake falhou" in caplog.text
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "auth=abc123xyz",
+        "pass=abc123xyz",
+        "credentials: abc123xyz",
+        "db_credential=abc123xyz",
+        "jwt eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0In0.abc123xyz",
+    ],
+)
+def test_more_secret_formats_masked(raw):
+    assert "abc123xyz" not in safe_text(f"erro {raw} fim")
+
+
+def test_truncation_drops_partial_credential_token():
+    # A query longa e removida, mas o corte em MAX_INPUT cai no meio do userinfo.
+    raw = "x " * 985 + "https://user:SEKRETSEKRET" + "Z" * 50 + "@host/p"
+    out = safe_text(raw, max_len=5000)
+    assert "SEKRET" not in out
