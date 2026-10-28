@@ -1,0 +1,29 @@
+# systemd --user. Dashboard somente em loopback (127.0.0.1:8765, sem autenticacao).
+# Caminho de instalacao assumido: ~/bankmon (%h/bankmon).
+[Unit]
+Description=Downdetector Banking Monitor - dashboard
+StartLimitIntervalSec=600
+StartLimitBurst=5
+
+[Service]
+Type=simple
+WorkingDirectory=%h/bankmon
+ExecStart=%h/bankmon/.venv/bin/python -P -m bankmon serve
+Restart=on-failure
+RestartSec=5
+Environment=PYTHONDONTWRITEBYTECODE=1
+
+# Hardening (unidades de usuario; ver limitacoes e fallback em docs/operacao.md).
+UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=yes
+# Em unidades --user, ProtectSystem= e afins so funcionam junto com PrivateUsers=yes
+# (systemd.exec(5)): sem ele o gerenciador de usuario nao consegue montar o namespace.
+PrivateUsers=yes
+ProtectSystem=strict
+SystemCallFilter=@system-service
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+ReadWritePaths=-%h/bankmon/data
+
+[Install]
+WantedBy=default.target

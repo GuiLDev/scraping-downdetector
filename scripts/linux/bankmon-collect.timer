@@ -1,0 +1,12 @@
+[Unit]
+Description=Downdetector Banking Monitor - coleta horaria
+
+[Timer]
+OnCalendar=hourly
+# Executa na proxima oportunidade se a maquina estava desligada na hora marcada.
+Persistent=true
+RandomizedDelaySec=30
+Unit=bankmon-collect.service
+
+[Install]
+WantedBy=timers.target

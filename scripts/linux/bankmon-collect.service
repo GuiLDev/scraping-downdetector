@@ -1,0 +1,28 @@
+# systemd --user. Instalacao: ver README (secao Agendamento) e docs/operacao.md.
+# Caminho de instalacao assumido: ~/bankmon (%h/bankmon). Se usar outro, edite
+# WorkingDirectory, ExecStart e ReadWritePaths.
+[Unit]
+Description=Downdetector Banking Monitor - coleta unica
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/bankmon
+ExecStart=%h/bankmon/.venv/bin/python -P -m bankmon collect --trigger scheduled
+# Mesmo limite do Windows: 30 minutos.
+TimeoutStartSec=30min
+# -P: a raiz do projeto (WorkingDirectory) nao entra em sys.path[0].
+Environment=PYTHONDONTWRITEBYTECODE=1
+
+# Hardening (unidades de usuario; ver limitacoes e fallback em docs/operacao.md).
+UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=yes
+# Em unidades --user, ProtectSystem= e afins so funcionam junto com PrivateUsers=yes
+# (systemd.exec(5)): sem ele o gerenciador de usuario nao consegue montar o namespace.
+PrivateUsers=yes
+ProtectSystem=strict
+SystemCallFilter=@system-service
+# Etapa 1 nao usa rede. A Etapa 2 (coletor real) vai precisar de: AF_UNIX AF_INET AF_INET6
+RestrictAddressFamilies=AF_UNIX
+# O "-" ignora o caminho se data/ ainda nao existir (rode `init-db` antes).
+ReadWritePaths=-%h/bankmon/data
