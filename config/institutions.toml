@@ -1,0 +1,145 @@
+# Configuracao do Downdetector Banking Monitor.
+
+[collector]
+# Coletores disponiveis: "demo" (dados sinteticos) e "downdetector" (stub, Etapa 2).
+active = "demo"
+
+[schedule]
+interval_minutes = 60
+# Folga de 1,5x o intervalo: dado mais antigo que isso vira "Sem dados".
+stale_after_minutes = 90
+
+[server]
+host = "127.0.0.1"
+port = 8765
+
+[demo]
+seed = 20261028
+
+[[categories]]
+id = "tradicionais"
+name = "Bancos tradicionais"
+order = 1
+
+[[categories]]
+id = "digitais"
+name = "Bancos digitais"
+order = 2
+
+[[categories]]
+id = "carteiras"
+name = "Carteiras e instituicoes de pagamento"
+order = 3
+
+[[categories]]
+id = "infraestrutura"
+name = "Infraestrutura"
+order = 4
+
+# dd_label: nome como aparece no Downdetector. Os valores abaixo sao
+# provisorios e serao confirmados na Etapa 2.
+
+[[institutions]]
+id = "itau"
+name = "Itaú"
+category = "tradicionais"
+dd_label = "Itaú"
+enabled = true
+
+[[institutions]]
+id = "bradesco"
+name = "Bradesco"
+category = "tradicionais"
+dd_label = "Bradesco"
+enabled = true
+
+[[institutions]]
+id = "santander"
+name = "Santander"
+category = "tradicionais"
+dd_label = "Santander"
+enabled = true
+
+[[institutions]]
+id = "banco-do-brasil"
+name = "Banco do Brasil"
+category = "tradicionais"
+dd_label = "Banco do Brasil"
+enabled = true
+
+[[institutions]]
+id = "caixa"
+name = "Caixa"
+category = "tradicionais"
+dd_label = "Caixa"
+enabled = true
+
+[[institutions]]
+id = "btg-pactual"
+name = "BTG Pactual"
+category = "tradicionais"
+dd_label = "BTG Pactual"
+enabled = true
+
+[[institutions]]
+id = "nubank"
+name = "Nubank"
+category = "digitais"
+dd_label = "Nubank"
+enabled = true
+
+[[institutions]]
+id = "inter"
+name = "Inter"
+category = "digitais"
+dd_label = "Banco Inter"
+enabled = true
+
+[[institutions]]
+id = "c6-bank"
+name = "C6 Bank"
+category = "digitais"
+dd_label = "C6 Bank"
+enabled = true
+
+[[institutions]]
+id = "neon"
+name = "Neon"
+category = "digitais"
+dd_label = "Neon"
+enabled = true
+
+[[institutions]]
+id = "next"
+name = "Next"
+category = "digitais"
+dd_label = "Next"
+enabled = true
+
+[[institutions]]
+id = "mercado-pago"
+name = "Mercado Pago"
+category = "carteiras"
+dd_label = "Mercado Pago"
+enabled = true
+
+[[institutions]]
+id = "picpay"
+name = "PicPay"
+category = "carteiras"
+dd_label = "PicPay"
+enabled = true
+
+[[institutions]]
+id = "pagbank"
+name = "PagBank"
+category = "carteiras"
+dd_label = "PagBank"
+enabled = true
+
+[[institutions]]
+id = "pix"
+name = "Pix"
+category = "infraestrutura"
+dd_label = "Pix"
+enabled = true

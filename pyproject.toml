@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=78.1.1"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bankmon"
+version = "0.1.0"
+description = "Downdetector Banking Monitor: dashboard e infraestrutura de coleta"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "flask>=3.1.3",
+    "werkzeug>=3.1.9",
+    "jinja2>=3.1.6",
+    "waitress>=3.0.2",
+    # zoneinfo("America/Sao_Paulo") precisa do banco de fusos no Windows
+    "tzdata",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=9"]
+
+[project.scripts]
+bankmon = "bankmon.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+bankmon = ["schema.sql"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
