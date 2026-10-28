@@ -22,3 +22,9 @@ bankmon.lock
 credentials*.json
 *.egg-info/
 .claude/settings.local.json
+# Paginas/capturas exportadas do Downdetector nunca vao para o repositorio (evidencias ficam em data/).
+/*.html
+*.mhtml
+*.har
+downdetector*.html
+/*.png
