@@ -27,6 +27,7 @@ PENDING_MESSAGE = "Coleta automatizada pendente de autorização do Downdetector
 class DowndetectorCollector:
     name = "downdetector"
     is_demo = False
+    data_kind = "live"
 
     def __init__(self, clock: Clock = utc_now) -> None:
         self._clock = clock

@@ -15,6 +15,9 @@
   {% if demo %}
   <div class="demo-banner" role="alert">{{ DEMO_BANNER }}</div>
   {% endif %}
+  {% if offline_banner %}
+  <div class="demo-banner" role="alert">{{ offline_banner }}</div>
+  {% endif %}
   <header class="container">
     <nav class="topnav" aria-label="Principal">
       <ul><li><strong>Monitor de instituições financeiras</strong></li></ul>

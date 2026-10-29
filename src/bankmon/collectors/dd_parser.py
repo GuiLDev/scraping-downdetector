@@ -34,6 +34,8 @@ _CF_TITLE = re.compile(
 TITLE_SCAN = 65_536
 MESSAGE_SCAN = 262_144  # mensagens de desafio ficam no inicio; evita normalizar o documento inteiro
 MAX_LABEL = 512
+MAX_SVG_ATTR = 201  # viewBox/width/height: 1 acima do limite do validador (200), que entao rejeita (sem virar outro numero)
+MAX_PATH_D = 20_001  # truncado em 1 acima do limite do validador, que entao rejeita
 MAX_BYTES = 5 * 1024 * 1024  # ~30x a pagina real (158 KB); acima disso o CLI recusa
 CF_STRUCTURE = ("cf_chl_opt", 'id="challenge-form"', "cf-chl-widget", "cf-error-details",
                 "cf-browser-verification", 'id="challenge-error-text"')
@@ -53,7 +55,7 @@ def _norm(text: str) -> str:
 
 
 class _ChartCollector(HTMLParser):
-    """Coleta (aria-label, stroke do primeiro path) de cada grafico de status."""
+    """Coleta (aria-label, stroke e geometria SVG crus) de cada grafico de status."""
 
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
@@ -75,14 +77,37 @@ class _ChartCollector(HTMLParser):
         self.depth += 1
         label = a.get("aria-label", "")
         if a.get("role") == "img" and "status atual" in _norm(label):
-            self.open.append({"label": label, "depth": self.depth, "stroke": None})
+            self.open.append({
+                "label": label, "depth": self.depth, "stroke": None, "path_seen": False,
+                "svg": {"viewbox": None, "width": None, "height": None, "path_d": None},
+            })
+        self._svg(tag, a)
 
     def handle_startendtag(self, tag, attrs):
-        self._path(tag, {k: (v or "") for k, v in attrs})
+        a = {k: (v or "") for k, v in attrs}
+        self._path(tag, a)
+        self._svg(tag, a)
+
+    def _svg(self, tag, a):
+        """Primeiro <svg> dentro do grafico (ou o proprio elemento do grafico, se for um <svg>)."""
+        if tag != "svg" or not self.open:
+            return
+        svg = self.open[-1]["svg"]
+        if svg["viewbox"] is None and svg["width"] is None and svg["height"] is None:
+            for key, attr in (("viewbox", "viewbox"), ("width", "width"), ("height", "height")):
+                if a.get(attr):
+                    svg[key] = a[attr][:MAX_SVG_ATTR]
 
     def _path(self, tag, a):
-        if tag == "path" and self.open and self.open[-1]["stroke"] is None:
-            self.open[-1]["stroke"] = self._stroke(a)
+        if tag != "path" or not self.open:
+            return
+        chart = self.open[-1]
+        if chart["stroke"] is None:
+            chart["stroke"] = self._stroke(a)
+        if not chart["path_seen"]:  # `d` do primeiro <path> do grafico
+            chart["path_seen"] = True
+            if a.get("d"):
+                chart["svg"]["path_d"] = a["d"][:MAX_PATH_D]
 
     def handle_endtag(self, tag):
         if tag in _VOID:
@@ -126,6 +151,7 @@ def _service(chart: dict) -> dict:
         "status": by_text if consistent else "unknown",
         "color": color,
         "stroke": stroke,
+        "svg": dict(chart["svg"]),  # cru; a validacao fica no coletor (svg_geometry)
         "source": "dom",
         "consistent": consistent,
         "issue": issue,

@@ -97,7 +97,7 @@ def test_stub_message_mentions_pending_authorization():
 
 
 def test_registry_contains_demo_and_downdetector_keyed_by_name():
-    assert set(registry.COLLECTORS) == {"demo", "downdetector"}
+    assert set(registry.COLLECTORS) == {"demo", "downdetector", "offline_html", "navegador"}
     for name, cls in registry.COLLECTORS.items():
         assert cls.name == name
 

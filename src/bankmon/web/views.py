@@ -14,6 +14,14 @@ from itertools import groupby
 from typing import Callable
 
 from bankmon import db, status
+from bankmon.browser_service import (
+    FAILURES_REASON,
+    FAILURES_TO_PAUSE,
+    EXTERNAL_FAILURES_REASON,
+    NO_RESUME_REASONS,
+    SUSPENDED_REASON,
+)
+from bankmon.collectors import svg_geometry
 from bankmon.config import Config
 from bankmon.status import InstitutionInfo, RunView
 from bankmon.textutil import safe_error, safe_text
@@ -48,6 +56,47 @@ DISCLAIMER = (
 DEMO_BANNER = "DADOS DE DEMONSTRAÇÃO — não refletem o Downdetector"
 
 
+OFFLINE_BANNER = (
+    "DADOS HISTÓRICOS DE VALIDAÇÃO OFFLINE — HTML exportado manualmente do Downdetector{captured}. "
+    "Não é monitoramento ao vivo."
+)
+HISTORICAL = "captura histórica"
+
+
+BROWSER_BANNER_SIMULATION = (
+    "COLETA PELO NAVEGADOR — SIMULAÇÃO LOCAL (páginas de teste, não é o Downdetector)"
+)
+BROWSER_BANNER_EXTERNAL = "COLETA PELO NAVEGADOR — leitura da aba aberta pelo usuário (origem autorizada)"
+PAUSED_NOTICE = (
+    "Coleta pausada: bloqueio detectado às {at}. Resolva manualmente na aba do navegador e clique em "
+    "Retomar verificação. Os dados exibidos estão desatualizados."
+)
+FAILURES_NOTICE = (
+    "Coleta pausada: {n} leituras seguidas sem sucesso desde {at}. Verifique a aba do navegador e clique "
+    "em Retomar verificação. Os dados exibidos estão desatualizados."
+)
+EXTERNAL_FAILURES_NOTICE = (
+    "Coleta suspensa: {n} leituras seguidas sem sucesso em origem externa. A coleta só volta após "
+    "revisão da configuração e da autorização."
+)
+SUSPENDED_NOTICE = (
+    "Coleta suspensa: a fonte exibiu uma verificação. A coleta automática fica encerrada até revisão "
+    "da autorização."
+)
+VERIFYING_NOTICE = "Verificação solicitada; aguardando a próxima leitura da aba."
+
+
+def offline_banner(cfg: Config, snap: "Snapshot | None") -> str | None:
+    """Texto da faixa do modo (offline ou navegador; None nos demais). Texto puro, autoescapado."""
+    if cfg.is_browser:
+        return BROWSER_BANNER_EXTERNAL if cfg.browser_external else BROWSER_BANNER_SIMULATION
+    if not cfg.is_offline:
+        return None
+    run = None if snap is None else (snap.last_ok or snap.latest)
+    captured = f", capturado em {dm_hm(run.finished_at)}" if run is not None else ""
+    return OFFLINE_BANNER.format(captured=captured)
+
+
 def hm(dt: datetime) -> str:
     return to_local(dt).strftime("%H:%M")
 
@@ -71,6 +120,9 @@ class Snapshot:
     latest: RunView | None = None
     last_ok: RunView | None = None
     last_transitions: dict[str, db.TransitionRow] = field(default_factory=dict)
+    # institution_id -> grafico ja revalidado (so da execucao `last_ok`; vazio se nao houver)
+    charts: dict[str, dict] = field(default_factory=dict)
+    coleta: db.CollectorState | None = None  # so no modo navegador
 
 
 def infos_from_config(cfg: Config) -> list[InstitutionInfo]:
@@ -118,14 +170,53 @@ def _checked(transitions):
     return transitions
 
 
+CHART_COLORS = ("red", "yellow", "blue")
+
+
+def _service_chart(row: sqlite3.Row) -> dict | None:
+    """Grafico de 24 h de um servico gravado, ou None. Revalida tudo antes de usar."""
+    if not row["consistent"] or row["color"] not in CHART_COLORS:
+        return None
+    viewbox = svg_geometry.validate_viewbox(row["svg_viewbox"])
+    path_d = svg_geometry.validate_path_d(row["svg_path_d"])
+    if viewbox is None or path_d is None:
+        return None
+    for dim in (row["svg_width"], row["svg_height"]):
+        if dim is not None and svg_geometry.validate_dimension(dim) is None:
+            return None
+    return {"color": row["color"], "viewbox": viewbox, "d": path_d}
+
+
+def _load_charts(conn: sqlite3.Connection, latest, last_ok) -> dict[str, dict]:
+    # So quando a execucao dos estados e a ultima valida (senao o grafico contradiria o cartao).
+    if last_ok is None or latest is None or latest.run_id != last_ok.run_id:
+        return {}
+    charts: dict[str, dict] = {}
+    try:
+        rows = db.run_services(conn, last_ok.run_id)
+    except sqlite3.Error:  # banco antigo (schema v1) sem run_services: sem graficos, nada mais
+        return {}
+    for row in rows:
+        iid = row["institution_id"]
+        if iid is None or iid in charts:
+            continue
+        chart = _service_chart(row)
+        if chart is not None:
+            charts[iid] = chart
+    return charts
+
+
 def load_snapshot(cfg: Config) -> Snapshot:
     def reader(conn: sqlite3.Connection) -> Snapshot:
         last_transitions = db.last_transition_by_institution(conn)
         _checked(last_transitions.values())
+        latest, last_ok = db.latest_run(conn), db.latest_ok_run(conn)
         return Snapshot(
-            latest=db.latest_run(conn),
-            last_ok=db.latest_ok_run(conn),
+            latest=latest,
+            last_ok=last_ok,
             last_transitions=last_transitions,
+            charts=_load_charts(conn, latest, last_ok),
+            coleta=db.get_collector_state(conn) if cfg.is_browser else None,
         )
 
     state, snap = read_db(cfg, reader)
@@ -168,7 +259,9 @@ def build_notices(
         detail = safe_text(latest.error_detail) if latest.error_detail else None
         notices.append(Notice("source", text, detail))
 
-    if last_ok is not None:
+    if last_ok is not None and cfg.is_offline:
+        header["last_ok"] = f"{dm_hm(last_ok.finished_at)} ({HISTORICAL})"
+    elif last_ok is not None:
         minutes = max(0, int((now - last_ok.finished_at).total_seconds() // 60))
         header["last_ok"] = f"{dm_hm(last_ok.finished_at)} (há {minutes} min)"
         if now - last_ok.finished_at > stale_after:
@@ -177,7 +270,9 @@ def build_notices(
     elif snap.db_state == "ok":
         notices.append(Notice("stale", "Nenhuma verificação válida registrada até agora."))
 
-    if latest is not None:
+    if cfg.is_offline:
+        header["next"] = HISTORICAL
+    elif latest is not None:
         nxt = latest.finished_at + timedelta(minutes=cfg.interval_minutes)
         header["next"] = hm(nxt) + (" (atrasada)" if nxt < now else "")
     return notices, header
@@ -198,13 +293,61 @@ def parse_filters(args, cfg: Config) -> dict[str, str]:
     }
 
 
-def _card_view(card: status.Card, snap: Snapshot, now: datetime, demo: bool) -> dict:
-    label, icon, css = STATE_UI[card.state]
-    since = None
+def since_text(cfg: Config, card: status.Card, snap: Snapshot, now: datetime) -> str | None:
+    """"desde ..." (ao vivo/demo) ou "Observado em: ..." (offline: so se sabe quando foi visto)."""
+    if cfg.is_offline:
+        if snap.last_ok is None or card.state in (status.NO_DATA, status.NOT_MONITORED):
+            return None
+        local = to_local(snap.last_ok.finished_at)
+        return f"Observado em: {local:%d/%m} às {local:%H:%M}"
     tr = snap.last_transitions.get(card.institution_id)
     if tr is not None and tr.to_state == card.state:
         same_day = to_local(tr.changed_at).date() == to_local(now).date()
-        since = hm(tr.changed_at) if same_day else dm_hm(tr.changed_at)
+        return "desde " + (hm(tr.changed_at) if same_day else dm_hm(tr.changed_at))
+    return None
+
+
+def stale_reading_text(cfg: Config, card: status.Card, snap: Snapshot) -> str | None:
+    """Modo navegador: cartao "Sem dados" mostra a ultima leitura valida, JAMAIS como estado atual.
+
+    So texto (sem icone nem classe de estado): dado velho nunca aparece como verde.
+    """
+    if not cfg.is_browser or card.state != status.NO_DATA or snap.last_ok is None:
+        return None
+    ok = snap.last_ok
+    previous = status.effective_state(
+        card.institution_id, ok, ok.finished_at, timedelta(minutes=cfg.stale_after_minutes)
+    )
+    if previous in (status.NO_DATA, status.NOT_MONITORED):
+        return None
+    local = to_local(ok.finished_at)
+    return (
+        f"Última leitura válida (desatualizada): {STATE_UI[previous][0]} "
+        f"em {local:%d/%m} às {local:%H:%M}"
+    )
+
+
+def coleta_notice(cfg: Config, snap: Snapshot) -> Notice | None:
+    """Aviso de pausa/verificacao da coleta pelo navegador."""
+    if not cfg.is_browser or snap.coleta is None:
+        return None
+    if snap.coleta.estado == "pausado":
+        at = hm(snap.coleta.desde) if snap.coleta.desde else "--:--"
+        if snap.coleta.motivo == SUSPENDED_REASON:
+            return Notice("source", SUSPENDED_NOTICE)
+        if snap.coleta.motivo == FAILURES_REASON:
+            return Notice("source", FAILURES_NOTICE.format(n=FAILURES_TO_PAUSE, at=at))
+        if snap.coleta.motivo == EXTERNAL_FAILURES_REASON:
+            return Notice("source", EXTERNAL_FAILURES_NOTICE.format(n=FAILURES_TO_PAUSE))
+        return Notice("source", PAUSED_NOTICE.format(at=at))
+    if snap.coleta.estado == "verificando":
+        return Notice("info", VERIFYING_NOTICE)
+    return None
+
+
+def _card_view(cfg: Config, card: status.Card, snap: Snapshot, now: datetime, demo: bool) -> dict:
+    label, icon, css = STATE_UI[card.state]
+    since = since_text(cfg, card, snap, now)
     return {
         "id": card.institution_id,
         "name": card.name,
@@ -214,6 +357,8 @@ def _card_view(card: status.Card, snap: Snapshot, now: datetime, demo: bool) -> 
         "icon": icon,
         "css": css,
         "since": since,
+        "stale_reading": stale_reading_text(cfg, card, snap),
+        "chart": snap.charts.get(card.institution_id),
         "demo": demo,
     }
 
@@ -249,7 +394,7 @@ def build_index(cfg: Config, args, now: datetime) -> dict:
                 {
                     "category": group[0].category_name,
                     "state_label": STATE_UI[state][0],
-                    "cards": [_card_view(c, snap, now, demo) for c in group],
+                    "cards": [_card_view(cfg, c, snap, now, demo) for c in group],
                 }
             )
         sections.append(
@@ -257,9 +402,15 @@ def build_index(cfg: Config, args, now: datetime) -> dict:
         )
 
     notices, header = build_notices(cfg, snap, now)
+    pause = coleta_notice(cfg, snap)
+    if pause is not None:
+        notices.insert(0, pause)
     return {
         "demo": demo,
+        "offline_banner": offline_banner(cfg, snap),
         "notices": notices,
+        "coleta_paused": snap.coleta is not None and snap.coleta.estado == "pausado"
+        and snap.coleta.motivo not in NO_RESUME_REASONS,  # suspensa (externa): sem botao
         "header": header,
         "sections": sections,
         "filters": filters,
@@ -333,6 +484,7 @@ def build_history(cfg: Config, args, now: datetime) -> dict:
     notices, _ = build_notices(cfg, Snapshot(db_state, latest, last_ok), now)
     return {
         "demo": demo,
+        "offline_banner": offline_banner(cfg, Snapshot(db_state, latest, last_ok)),
         "notices": notices,
         "period": period,
         "periods": list(PERIODS),
@@ -398,6 +550,7 @@ def build_institution(cfg: Config, institution_id: str, args, now: datetime) -> 
     label, icon, css = STATE_UI[current]
     return {
         "demo": demo,
+        "offline_banner": offline_banner(cfg, Snapshot(db_state, latest, last_ok)),
         "notices": notices,
         "info": info,
         "current": {"label": label, "icon": icon, "css": css},

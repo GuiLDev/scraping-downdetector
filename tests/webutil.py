@@ -22,7 +22,14 @@ INSTITUTIONS = (
 )
 
 
-def toml_text(collector: str = "demo", institutions=INSTITUTIONS) -> str:
+LOCAL_ORIGIN = "http://127.0.0.1:8777"
+LOCAL_SECTION = (
+    f'\n[coleta_navegador]\norigens_autorizadas = ["{LOCAL_ORIGIN}", "http://localhost:9100"]\n'
+    "intervalo_minimo_local_s = 0\n"
+)
+
+
+def toml_text(collector: str = "demo", institutions=INSTITUTIONS, extra: str = "") -> str:
     parts = [
         f'[collector]\nactive = "{collector}"\n',
         "[schedule]\ninterval_minutes = 60\nstale_after_minutes = 90\n",
@@ -36,12 +43,12 @@ def toml_text(collector: str = "demo", institutions=INSTITUTIONS) -> str:
             f'[[institutions]]\nid = "{iid}"\nname = {json.dumps(name)}\n'
             f'category = "{cat}"\ndd_label = {json.dumps(name)}\n'
         )
-    return "\n".join(parts)
+    return "\n".join(parts) + extra
 
 
-def make_cfg(tmp_path, monkeypatch, collector="demo", institutions=INSTITUTIONS) -> Config:
+def make_cfg(tmp_path, monkeypatch, collector="demo", institutions=INSTITUTIONS, extra: str = "") -> Config:
     path = tmp_path / "cfg.toml"
-    path.write_text(toml_text(collector, institutions), "utf-8")
+    path.write_text(toml_text(collector, institutions, extra), "utf-8")
     monkeypatch.setenv("BANKMON_CONFIG", str(path))
     monkeypatch.setenv("BANKMON_DATA_DIR", str(tmp_path / "data"))
     return load_config()

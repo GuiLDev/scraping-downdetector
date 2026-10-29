@@ -9,12 +9,22 @@ from datetime import datetime
 from pathlib import Path
 from typing import Iterator, Sequence
 
-from bankmon.collectors.base import CollectionResult, InstitutionRef, Observation
+from bankmon.collectors.base import (
+    CollectionResult,
+    InstitutionRef,
+    Observation,
+    ServiceRecord,
+    SourceInfo,
+)
 from bankmon.config import Config
 from bankmon.status import InstitutionInfo, RunView
 from bankmon.timeutil import from_iso, to_iso
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 4
+V2_MARKER = "-- @v2"
+V3_MARKER = "-- @v3"
+V4_MARKER = "-- @v4"
+COLLECTOR_STATES = ("ativo", "pausado", "verificando")
 SCHEMA_PATH = Path(__file__).with_name("schema.sql")
 
 
@@ -44,11 +54,46 @@ def transaction(conn: sqlite3.Connection) -> Iterator[sqlite3.Connection]:
     conn.execute("COMMIT")
 
 
+def _section_statements(start: str, end: str | None) -> list[str]:
+    """DDL aditivo de schema.sql entre dois marcadores `-- @vN` (sem comentarios nem PRAGMA)."""
+    text = SCHEMA_PATH.read_text(encoding="utf-8")
+    part = text.split(start, 1)[1]
+    if end is not None:
+        part = part.split(end, 1)[0]
+    lines = part.splitlines()[1:]  # descarta o resto da linha do marcador
+    lines = [ln for ln in lines if not ln.lstrip().startswith("--")]
+    statements = [s.strip() for s in chr(10).join(lines).split(";") if s.strip()]
+    return [s for s in statements if not s.upper().startswith("PRAGMA")]
+
+
+def _v2_statements() -> list[str]:
+    return _section_statements(V2_MARKER, V3_MARKER)
+
+
+def _v3_statements() -> list[str]:
+    return _section_statements(V3_MARKER, V4_MARKER)
+
+
+def _v4_statements() -> list[str]:
+    return _section_statements(V4_MARKER, None)
+
+
 def init_db(conn: sqlite3.Connection) -> None:
-    """Cria o schema se o banco for novo; falha se for de versao mais nova."""
+    """Cria o schema se o banco for novo; migra v1/v2/v3 -> v4 (so DDL aditivo; a unica tabela
+    recriada, run_sources, tem os dados copiados) e falha se a versao for maior que a suportada."""
     version = conn.execute("PRAGMA user_version").fetchone()[0]
     if version == 0:
         conn.executescript(SCHEMA_PATH.read_text(encoding="utf-8"))
+    elif version in (1, 2, 3):
+        with transaction(conn):
+            statements = (
+                (_v2_statements() if version == 1 else [])
+                + (_v3_statements() if version <= 2 else [])
+                + _v4_statements()
+            )
+            for statement in statements:
+                conn.execute(statement)
+            conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
     elif version != SCHEMA_VERSION:
         raise DatabaseError(
             f"versão do schema {version} incompatível (esperada {SCHEMA_VERSION})"
@@ -185,6 +230,43 @@ def insert_observations(
     )
 
 
+def insert_run_source(
+    conn: sqlite3.Connection, run_id: int, source: SourceInfo, imported_at: datetime
+) -> None:
+    conn.execute(
+        "INSERT INTO run_sources (run_id, kind, file_name, sha256, size_bytes, captured_at, "
+        "imported_at, url) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            run_id,
+            source.kind,
+            source.file_name,
+            source.sha256,
+            source.size_bytes,
+            to_iso(source.captured_at),
+            to_iso(imported_at),
+            source.url,
+        ),
+    )
+
+
+def insert_run_services(
+    conn: sqlite3.Connection, run_id: int, services: Sequence[ServiceRecord]
+) -> None:
+    conn.executemany(
+        "INSERT INTO run_services (run_id, position, service, status, status_original, color, "
+        "consistent, issue, institution_id, svg_viewbox, svg_width, svg_height, svg_path_d) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        [
+            (
+                run_id, s.position, s.service, s.status, s.status_original, s.color,
+                int(s.consistent), s.issue, s.institution_id, s.svg_viewbox, s.svg_width,
+                s.svg_height, s.svg_path_d,
+            )
+            for s in services
+        ],
+    )
+
+
 def insert_transitions(
     conn: sqlite3.Connection,
     run_id: int,
@@ -295,3 +377,118 @@ def failed_runs_between(
         )
         for r in rows
     ]
+
+
+def run_source(conn: sqlite3.Connection, run_id: int) -> sqlite3.Row | None:
+    """Origem (arquivo) da execucao, ou None se ela nao veio de importacao."""
+    return conn.execute("SELECT * FROM run_sources WHERE run_id = ?", (run_id,)).fetchone()
+
+
+def run_services(conn: sqlite3.Connection, run_id: int) -> list[sqlite3.Row]:
+    """Servicos gravados da execucao, na ordem da pagina."""
+    return conn.execute(
+        "SELECT * FROM run_services WHERE run_id = ? ORDER BY position", (run_id,)
+    ).fetchall()
+
+
+def source_sha256_exists(conn: sqlite3.Connection, sha256: str) -> bool:
+    return conn.execute(
+        "SELECT 1 FROM run_sources WHERE sha256 = ? LIMIT 1", (sha256,)
+    ).fetchone() is not None
+
+
+# --- Estado da coleta pelo navegador (v3) ----------------------------------------
+
+
+@dataclass(frozen=True)
+class CollectorState:
+    estado: str  # um de COLLECTOR_STATES
+    motivo: str | None
+    desde: datetime | None  # None so quando nunca houve mudanca (estado padrao "ativo")
+
+
+def get_collector_state(conn: sqlite3.Connection) -> CollectorState:
+    """Estado atual; sem linha gravada = `ativo`. Funciona em conexao somente leitura."""
+    row = conn.execute("SELECT estado, motivo, desde FROM collector_state WHERE id = 1").fetchone()
+    if row is None:
+        return CollectorState("ativo", None, None)
+    if row["estado"] not in COLLECTOR_STATES:
+        raise ValueError("estado da coleta desconhecido")
+    return CollectorState(row["estado"], row["motivo"], from_iso(row["desde"]))
+
+
+def set_collector_state(
+    conn: sqlite3.Connection, estado: str, motivo: str | None, now: datetime
+) -> None:
+    """Grava o estado; `desde` so muda quando o estado muda (o motivo sempre e atualizado)."""
+    if estado not in COLLECTOR_STATES:
+        raise ValueError(f"estado da coleta inválido: {estado!r}")
+    with transaction(conn):
+        current = conn.execute("SELECT estado, desde FROM collector_state WHERE id = 1").fetchone()
+        since = current["desde"] if current is not None and current["estado"] == estado else to_iso(now)
+        conn.execute(
+            "INSERT INTO collector_state (id, estado, motivo, desde, atualizado_em) "
+            "VALUES (1, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET estado = excluded.estado, "
+            "motivo = excluded.motivo, desde = excluded.desde, atualizado_em = excluded.atualizado_em",
+            (estado, motivo, since, to_iso(now)),
+        )
+
+
+def recent_statuses(conn: sqlite3.Connection, limit: int, since: datetime | None = None) -> list[str]:
+    """`source_status` das ultimas `limit` execucoes (mais recente primeiro), opcionalmente so as
+    com finished_at >= `since`."""
+    sql, params = "SELECT source_status FROM runs", []
+    if since is not None:
+        sql += " WHERE finished_at >= ?"
+        params.append(to_iso(since))
+    rows = conn.execute(sql + " ORDER BY id DESC LIMIT ?", (*params, limit)).fetchall()
+    return [r["source_status"] for r in rows]
+
+
+# --- Reservas da vaga de leitura (v4) --------------------------------------------------------------
+
+
+def last_reservation_at(conn: sqlite3.Connection, origin: str) -> datetime | None:
+    """Ultima reserva da origem (consumida ou nao): a recarga acontece depois dela."""
+    row = conn.execute(
+        "SELECT MAX(reserved_at) AS at FROM collector_reservations WHERE origin = ?", (origin,)
+    ).fetchone()
+    return from_iso(row["at"]) if row["at"] else None
+
+
+def has_open_reservation(conn: sqlite3.Connection, origin: str, now: datetime) -> bool:
+    """Ha reserva nao consumida e ainda nao expirada para a origem?"""
+    return conn.execute(
+        "SELECT 1 FROM collector_reservations WHERE origin = ? AND consumed_at IS NULL "
+        "AND expires_at > ? LIMIT 1",
+        (origin, to_iso(now)),
+    ).fetchone() is not None
+
+
+def insert_reservation(
+    conn: sqlite3.Connection, reservation_id: str, origin: str, reserved_at: datetime, expires_at: datetime
+) -> None:
+    conn.execute(
+        "INSERT INTO collector_reservations (id, origin, reserved_at, expires_at) VALUES (?, ?, ?, ?)",
+        (reservation_id, origin, to_iso(reserved_at), to_iso(expires_at)),
+    )
+
+
+def is_reservation_valid(conn: sqlite3.Connection, reservation_id: str, origin: str, now: datetime) -> bool:
+    return conn.execute(
+        "SELECT 1 FROM collector_reservations WHERE id = ? AND origin = ? AND consumed_at IS NULL "
+        "AND expires_at > ?",
+        (reservation_id, origin, to_iso(now)),
+    ).fetchone() is not None
+
+
+def consume_reservation(
+    conn: sqlite3.Connection, reservation_id: str, origin: str, now: datetime
+) -> bool:
+    """Marca a reserva como consumida; False se nao for valida (outra origem, usada ou expirada)."""
+    cur = conn.execute(
+        "UPDATE collector_reservations SET consumed_at = ? WHERE id = ? AND origin = ? "
+        "AND consumed_at IS NULL AND expires_at > ?",
+        (to_iso(now), reservation_id, origin, to_iso(now)),
+    )
+    return cur.rowcount == 1

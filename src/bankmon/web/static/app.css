@@ -120,6 +120,21 @@
 .card .muted { color: inherit; opacity: .85; font-size: .85rem; }
 .card .state-badge { background: transparent; }
 
+/* Grafico de 24 h do Downdetector (geometria original; cor por classe) */
+.dd-chart { display: block; width: 100%; height: 40px; margin-top: .4rem; }
+.dd-chart path { fill: none; stroke: var(--dd-stroke); stroke-width: 2; vector-effect: non-scaling-stroke; }
+.dd-chart-red { --dd-stroke: #b71c1c; }
+.dd-chart-yellow { --dd-stroke: #7a5f00; }
+.dd-chart-blue { --dd-stroke: #1565c0; }
+[data-theme="dark"] .dd-chart-red { --dd-stroke: #ff8a80; }
+[data-theme="dark"] .dd-chart-yellow { --dd-stroke: #ffd54f; }
+[data-theme="dark"] .dd-chart-blue { --dd-stroke: #90caf9; }
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme]) .dd-chart-red { --dd-stroke: #ff8a80; }
+  :root:not([data-theme]) .dd-chart-yellow { --dd-stroke: #ffd54f; }
+  :root:not([data-theme]) .dd-chart-blue { --dd-stroke: #90caf9; }
+}
+
 /* Graficos */
 .chart-box { position: relative; height: 22rem; }
 .chart-box-timeline { height: 11rem; }

@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 from bankmon.collectors.base import Clock, Collector
+from bankmon.collectors.browser_html import BrowserHtmlCollector
 from bankmon.collectors.demo import DemoCollector
 from bankmon.collectors.downdetector import DowndetectorCollector
+from bankmon.collectors.offline_html import OfflineHtmlCollector
 
 COLLECTORS: dict[str, type[Collector]] = {
     DemoCollector.name: DemoCollector,
     DowndetectorCollector.name: DowndetectorCollector,
+    OfflineHtmlCollector.name: OfflineHtmlCollector,
+    BrowserHtmlCollector.name: BrowserHtmlCollector,
 }
 
 

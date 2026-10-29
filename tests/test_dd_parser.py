@@ -24,6 +24,7 @@ def test_real_fragment_from_user():
     assert r["services"][0] == {
         "service": "Claro", "status_original": "enfrenta problemas", "status": "critical", "color": "red",
         "stroke": "var(--color-dd-red)", "source": "dom", "consistent": True, "issue": None, "duplicate": False,
+            "svg": {"viewbox": None, "width": None, "height": None, "path_d": None},
     }
 
 

@@ -1,0 +1,194 @@
+"""Logica do background.js da extensao, executada em Node com um `chrome` falso (sem navegador).
+
+Os cenarios cobrem o contrato: so consulta/le/recarrega a aba SEM ativa-la, respeita a pausa, espera
+a pagina estabilizar (ate 45 s) e envia o HTML ao servidor com o token no cabecalho.
+"""
+
+from __future__ import annotations
+
+import json
+import shutil
+import subprocess
+
+import pytest
+
+from bankmon.config import PROJECT_ROOT
+
+NODE = shutil.which("node")
+pytestmark = pytest.mark.skipif(NODE is None, reason="Node.js nao encontrado")
+SCRIPT = PROJECT_ROOT / "extension" / "coletor" / "background.js"
+HARNESS = PROJECT_ROOT / "tests" / "js" / "background_harness.js"
+
+
+def reading(graficos=12, html="<html>pagina</html>", desafio=False):
+    return {"html": html, "graficos": graficos, "desafio": desafio}
+
+
+def run_scenario(**scenario):
+    out = subprocess.run([NODE, str(HARNESS), str(SCRIPT)], input=json.dumps(scenario),
+                         capture_output=True, text=True, timeout=60)
+    assert out.returncode == 0, out.stderr
+    return json.loads(out.stdout)
+
+
+def test_collects_reloads_target_tab_without_activating_and_posts_html():
+    rep = run_scenario(readings=[reading(5), reading(12), reading(12, "<html>final</html>")])
+    assert "error" not in rep
+    assert rep["reloads"] == [1] and rep["forbidden"] == []
+    assert rep["estadoToken"] == "TOKEN-DE-TESTE"
+    (post,) = rep["posts"]
+    assert post["headers"]["X-BankMonitor-Token"] == "TOKEN-DE-TESTE"
+    assert post["body"] == {"url": "http://127.0.0.1:8777/dd?x=1", "html": "<html>final</html>",
+                            "reserva_id": "RES-1"}
+    assert rep["result"]["resultado"] == "enviado"
+
+
+def test_does_nothing_while_collection_is_paused():
+    rep = run_scenario(estado="pausado", readings=[reading()])
+    assert rep["reloads"] == [] and rep["posts"] == [] and rep["reads"] == 0
+    assert rep["result"]["resultado"] == "pausado"
+
+
+def test_reserves_the_slot_before_reloading_and_sends_the_reservation_id():
+    rep = run_scenario(readings=[reading(12), reading(12)])
+    assert rep["order"] == ["estado", "reserva", "reload", "post"]
+    (reserva,) = rep["reservas"]
+    assert reserva["body"] == {"alvo": "http://127.0.0.1:8777/dd"}
+    assert reserva["headers"]["X-BankMonitor-Token"] == "TOKEN-DE-TESTE"
+
+
+@pytest.mark.parametrize("status,body,result", [
+    (429, {"erro": "intervalo"}, "intervalo"),
+    (409, {"erro": "reserva_ativa"}, "reserva_ativa"),
+    (409, {"erro": "pausado"}, "pausado"),
+])
+def test_refused_reservation_never_reloads_nor_posts(status, body, result):
+    rep = run_scenario(reservaStatus=status, reservaBody=body, readings=[reading()])
+    assert rep["reloads"] == [] and rep["posts"] == [] and rep["reads"] == 0
+    assert rep["result"]["resultado"] == result and rep["cleared"] == []
+
+
+@pytest.mark.parametrize("status", [401, 403])
+def test_unauthorized_reservation_stops_everything_and_clears_the_alarm(status):
+    rep = run_scenario(reservaStatus=status, readings=[reading()])
+    assert rep["reloads"] == [] and rep["posts"] == [] and rep["cleared"] == ["bankmon-coleta"]
+    assert rep["result"]["resultado"] == "nao_autorizado"
+
+
+def test_server_error_on_reservation_does_not_reload():
+    rep = run_scenario(reservaStatus=500, readings=[reading()])
+    assert rep["reloads"] == [] and rep["result"]["resultado"] == "erro"
+
+
+def test_verifying_state_reads_the_current_dom_without_reload_or_reservation():
+    rep = run_scenario(estado="verificando", readings=[reading(12), reading(12, "<html>atual</html>")])
+    assert rep["reloads"] == [] and rep["reservas"] == [] and rep["forbidden"] == []
+    assert rep["order"] == ["estado", "post"] and rep["reads"] >= 1
+    (post,) = rep["posts"]
+    assert post["body"]["modo"] == "verificacao" and "reserva_id" not in post["body"]
+    assert post["body"]["url"] == "http://127.0.0.1:8777/dd?x=1"
+    assert rep["result"]["resultado"] == "enviado"
+
+
+def test_verifying_state_sends_a_challenge_page_as_is_and_still_never_reloads():
+    rep = run_scenario(estado="verificando", readings=[reading(0, "<title>Just a moment...</title>", desafio=True)])
+    assert rep["reloads"] == [] and rep["posts"][0]["body"]["modo"] == "verificacao"
+
+
+def test_verifying_without_the_tab_does_nothing():
+    rep = run_scenario(estado="verificando", tabs=[{"id": 9, "url": "http://127.0.0.1:1/x", "active": True}],
+                       readings=[reading()])
+    assert rep["reloads"] == [] and rep["posts"] == [] and rep["result"]["resultado"] == "sem_aba"
+
+
+def test_without_matching_tab_it_neither_reserves_reloads_nor_posts():
+    rep = run_scenario(tabs=[{"id": 9, "url": "http://127.0.0.1:8777/outro", "active": True}], readings=[reading()])
+    assert rep["reloads"] == [] and rep["posts"] == [] and rep["reservas"] == [] and rep["result"]["resultado"] == "sem_aba"
+
+
+def test_challenge_signal_posts_immediately_without_waiting_for_stability():
+    rep = run_scenario(readings=[reading(0, "<title>Just a moment...</title>", desafio=True)])
+    assert rep["reads"] == 1 and len(rep["posts"]) == 1
+    assert "Just a moment" in rep["posts"][0]["body"]["html"]
+
+
+def test_waits_until_chart_count_is_stable_in_two_reads():
+    rep = run_scenario(readings=[reading(0), reading(3), reading(7), reading(7)])
+    assert rep["reads"] == 4 and len(rep["posts"]) == 1
+
+
+def test_gives_up_waiting_after_45_seconds_and_still_posts_the_last_reading():
+    changing = [reading(n, f"<p>{n}</p>") for n in range(1, 200)]
+    rep = run_scenario(readings=changing)
+    assert 45_000 <= rep["elapsedMs"] <= 60_000
+    assert len(rep["posts"]) == 1
+
+
+def test_page_that_never_completes_loading_is_abandoned_without_posting():
+    rep = run_scenario(neverComplete=True, readings=[reading()])
+    assert rep["posts"] == [] and rep["result"]["resultado"] == "carregamento_incompleto"
+
+
+def test_html_over_5mb_is_not_sent():
+    rep = run_scenario(readings=[reading(12, "x" * (5 * 1024 * 1024 + 1))])
+    assert rep["posts"] == [] and rep["result"]["resultado"] == "html_grande_demais"
+
+
+def test_alarm_period_is_the_configured_interval_with_half_minute_floor():
+    assert run_scenario(mode="alarm", config={"intervalo_min": 7})["alarms"][0]["periodInMinutes"] == 7
+    assert run_scenario(mode="alarm", config={"intervalo_min": 0.1})["alarms"][0]["periodInMinutes"] == 0.5
+    assert run_scenario(mode="alarm")["hasAlarmHandler"] is True
+
+
+# --- revisao de seguranca: SEC-002, SEC-004, SEC-005 -------------------------------------------------
+
+
+def test_state_request_carries_the_target_so_the_server_can_revoke_it():
+    rep = run_scenario(readings=[reading(12), reading(12)])
+    assert rep["estadoUrls"] == ["http://127.0.0.1:8765/api/coleta/estado?alvo=http%3A%2F%2F127.0.0.1%3A8777%2Fdd"]
+
+
+@pytest.mark.parametrize("status", [401, 403])
+def test_unauthorized_state_stops_everything_and_clears_the_alarm(status):
+    rep = run_scenario(estadoStatus=status, readings=[reading()])
+    assert rep["reloads"] == [] and rep["posts"] == [] and rep["reads"] == 0
+    assert rep["cleared"] == ["bankmon-coleta"] and rep["result"]["resultado"] == "nao_autorizado"
+
+
+def test_other_state_errors_do_not_reload_nor_clear_the_alarm():
+    rep = run_scenario(estadoStatus=500, readings=[reading()])
+    assert rep["reloads"] == [] and rep["cleared"] == [] and rep["result"]["resultado"] == "erro"
+
+
+@pytest.mark.parametrize("status", [401, 403])
+def test_unauthorized_post_clears_the_alarm(status):
+    rep = run_scenario(postStatus=status, readings=[reading(12), reading(12)])
+    assert rep["cleared"] == ["bankmon-coleta"] and rep["result"]["resultado"] == "nao_autorizado"
+
+
+def test_tab_match_uses_origin_and_path_prefix_not_raw_startswith():
+    tabs = [
+        {"id": 1, "url": "http://localhost.evil.example/", "active": False},
+        {"id": 2, "url": "http://localhost:3000/", "active": False},
+        {"id": 3, "url": "http://localhost/pagina?x=1", "active": False},
+    ]
+    perms = ["http://localhost/*", "http://localhost.evil.example/*", "http://localhost:3000/*", "http://127.0.0.1:8765/*"]
+    rep = run_scenario(tabs=tabs, hostPermissions=perms, config={"alvo": "http://localhost/"},
+                       readings=[reading(12), reading(12)])
+    assert rep["reloads"] == [3]
+
+
+def test_path_prefix_matches_the_exact_page_and_subpaths_but_not_siblings():
+    base = {"active": False}
+    tabs = [{"id": 1, "url": "http://127.0.0.1:8777/ddx", **base}, {"id": 2, "url": "http://127.0.0.1:8777/outro", **base},
+            {"id": 3, "url": "http://127.0.0.1:8777/dd", **base}]
+    rep = run_scenario(tabs=tabs, config={"alvo": "http://127.0.0.1:8777/dd/"}, readings=[reading(12), reading(12)])
+    assert rep["reloads"] == [3]
+    rep = run_scenario(tabs=[{"id": 4, "url": "http://127.0.0.1:8777/dd/sub?q=1", **base}],
+                       config={"alvo": "http://127.0.0.1:8777/dd/"}, readings=[reading(12), reading(12)])
+    assert rep["reloads"] == [4]
+
+
+def test_works_without_the_tabs_permission_using_only_host_permissions():
+    rep = run_scenario(readings=[reading(12), reading(12)])  # o harness esconde `url` fora dos host_permissions
+    assert rep["forbidden"] == [] and rep["reloads"] == [1] and set(rep["scripted"]) == {1} and len(rep["posts"]) == 1

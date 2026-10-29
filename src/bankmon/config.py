@@ -14,12 +14,32 @@ import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 
+from bankmon import origins
 from bankmon.collectors.registry import COLLECTORS, collector_class
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_CONFIG_PATH = PROJECT_ROOT / "config" / "institutions.toml"
 SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
 MAX_STALE_MINUTES = 1440
+DEFAULT_LOCAL_INTERVAL_S = 30
+NO_ORIGINS_MESSAGE = (
+    "nenhuma origem autorizada para a coleta pelo navegador: liste as origens exatas em "
+    "[coleta_navegador] origens_autorizadas (ex.: [\"http://127.0.0.1:8791\"])"
+)
+# Origem externa so vale com `autorizacao_ref` igual a um identificador listado nesta secao do doc.
+AUTHORIZATIONS_DOC = PROJECT_ROOT / "docs" / "etapa2-viabilidade-coletor.md"
+AUTHORIZATIONS_HEADING = "Autorizações registradas"
+DB_FILES = {
+    "demo": "bankmon-demo.db",
+    "offline": "bankmon-offline.db",
+    "browser": "bankmon-navegador.db",
+    "live": "bankmon.db",
+}
+# Coletores que so rodam por um comando proprio (nunca pelo agendador): dica de uso.
+NOT_ACTIVE_HINTS = {
+    "offline_html": "use `python -m bankmon import-html ARQUIVO` (e --offline)",
+    "navegador": "use `python -m bankmon serve --navegador` (e a extensão do navegador)",
+}
 
 
 class ConfigError(Exception):
@@ -54,14 +74,37 @@ class Config:
     demo_seed: int
     categories: tuple[CategoryConfig, ...]
     institutions: tuple[InstitutionConfig, ...]
+    # Coleta pelo navegador: lista EXPLICITA de origens (nada implicito), a referencia da autorizacao
+    # (so para origem externa) e o intervalo minimo entre recargas de uma origem loopback.
+    browser_origins: tuple[str, ...] = ()
+    browser_authorization_ref: str = ""
+    browser_local_interval_s: int = DEFAULT_LOCAL_INTERVAL_S
+
+    @property
+    def browser_external(self) -> bool:
+        """True se ha origem autorizada fora do loopback (a faixa deixa de dizer "simulacao")."""
+        return any(not origins.is_loopback_pattern(o) for o in self.browser_origins)
 
     @property
     def is_demo(self) -> bool:
         return collector_class(self.collector).is_demo
 
     @property
+    def data_kind(self) -> str:
+        cls = collector_class(self.collector)
+        return getattr(cls, "data_kind", "demo" if cls.is_demo else "live")
+
+    @property
+    def is_offline(self) -> bool:
+        return self.data_kind == "offline"
+
+    @property
+    def is_browser(self) -> bool:
+        return self.data_kind == "browser"
+
+    @property
     def db_path(self) -> Path:
-        return self.data_dir / ("bankmon-demo.db" if self.is_demo else "bankmon.db")
+        return self.data_dir / DB_FILES[self.data_kind]
 
     @property
     def lock_path(self) -> Path:
@@ -108,6 +151,11 @@ def load_config(
             f"coletor desconhecido: {collector!r} (disponíveis: {', '.join(sorted(COLLECTORS))})"
         )
 
+    if collector in NOT_ACTIVE_HINTS:
+        raise ConfigError(
+            f"o coletor {collector!r} não pode ser o coletor ativo; {NOT_ACTIVE_HINTS[collector]}"
+        )
+
     interval = _get(raw, "schedule", "interval_minutes", int)
     stale_after = _get(raw, "schedule", "stale_after_minutes", int)
     if interval <= 0:
@@ -133,6 +181,7 @@ def load_config(
     categories = _parse_categories(raw.get("categories"))
     institutions = _parse_institutions(raw.get("institutions"), {c.id for c in categories})
 
+    browser_origins, auth_ref, local_interval = _parse_browser_section(raw.get("coleta_navegador"))
     return Config(
         config_path=cfg_path,
         data_dir=resolve_data_dir(data_dir),
@@ -144,7 +193,53 @@ def load_config(
         demo_seed=seed,
         categories=categories,
         institutions=institutions,
+        browser_origins=browser_origins,
+        browser_authorization_ref=auth_ref,
+        browser_local_interval_s=local_interval,
     )
+
+
+def registered_authorizations() -> set[str]:
+    """Identificadores (`- `ID`: ...`) sob "## Autorizações registradas" do doc de viabilidade."""
+    try:
+        text = AUTHORIZATIONS_DOC.read_text(encoding="utf-8")
+    except OSError:
+        return set()
+    m = re.search(rf"(?ms)^## {AUTHORIZATIONS_HEADING}[^\n]*\n(.*?)(?=^## |\Z)", text)
+    return set(re.findall(r"(?m)^- `([A-Za-z0-9._-]+)`", m.group(1))) if m else set()
+
+
+def _parse_browser_section(raw) -> tuple[tuple[str, ...], str, int]:
+    """`[coleta_navegador]`: origens exatas, `autorizacao_ref` (so p/ externa) e intervalo local."""
+    if raw is None:
+        return (), "", DEFAULT_LOCAL_INTERVAL_S
+    if not isinstance(raw, dict):
+        raise ConfigError("[coleta_navegador] deve ser uma tabela")
+    listed = raw.get("origens_autorizadas", [])
+    if not isinstance(listed, list) or not all(isinstance(o, str) for o in listed):
+        raise ConfigError("[coleta_navegador] origens_autorizadas deve ser uma lista de textos")
+    ref = raw.get("autorizacao_ref", "")
+    if not isinstance(ref, str):
+        raise ConfigError("[coleta_navegador] autorizacao_ref deve ser str")
+    ref = ref.strip()
+    interval = raw.get("intervalo_minimo_local_s", DEFAULT_LOCAL_INTERVAL_S)
+    if not isinstance(interval, int) or isinstance(interval, bool) or interval < 0:
+        raise ConfigError("[coleta_navegador] intervalo_minimo_local_s deve ser inteiro >= 0")
+    try:
+        external = [o for o in listed if not origins.is_loopback_pattern(o)]
+    except ValueError as exc:
+        raise ConfigError(f"[coleta_navegador] origens_autorizadas: {exc}") from None
+    if external and not ref:
+        raise ConfigError(
+            "[coleta_navegador] origem externa exige autorizacao_ref não vazio "
+            "(referência da autorização para ler a origem externa)"
+        )
+    if external and ref not in registered_authorizations():
+        raise ConfigError(
+            f"[coleta_navegador] autorizacao_ref {ref!r} não consta em \"{AUTHORIZATIONS_HEADING}\" "
+            f"de {AUTHORIZATIONS_DOC.name}: origem externa recusada"
+        )
+    return tuple(o.strip().lower() for o in listed), ref, interval
 
 
 def _is_loopback_ip(host: str) -> bool:

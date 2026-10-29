@@ -7,6 +7,7 @@ import pytest
 import waitress
 
 from bankmon import cli
+from bankmon.web import collect_api
 from webutil import make_cfg
 
 
@@ -20,7 +21,8 @@ def test_serve_builds_app_and_calls_waitress(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(waitress, "serve", fake_serve)
     assert cli.main(["serve"]) == cli.EXIT_OK
 
-    assert calls["kwargs"] == {"host": cfg.host, "port": cfg.port, "threads": 4}
+    assert calls["kwargs"] == {"host": cfg.host, "port": cfg.port, "threads": 4,
+                                "max_request_body_size": collect_api.MAX_BODY_BYTES}
     # a app entregue ao waitress e a do dashboard (responde ao test client)
     assert calls["app"].test_client().get("/").status_code == 200
     out = capsys.readouterr().out

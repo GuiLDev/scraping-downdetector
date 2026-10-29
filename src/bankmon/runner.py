@@ -5,23 +5,30 @@ from __future__ import annotations
 import dataclasses
 import logging
 import os
+import re
 import sqlite3
 import sys
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Iterator
+from typing import Callable, Iterator
 
 from bankmon import db
 from bankmon.collectors.base import (
     LEVELS,
+    SERVICE_COLORS,
+    SERVICE_STATUSES,
+    SOURCE_KINDS,
     SOURCE_STATUSES,
     CollectionResult,
     Clock,
     Collector,
     Observation,
+    ServiceRecord,
+    SourceInfo,
 )
+from bankmon.collectors import svg_geometry
 from bankmon.collectors.registry import create_collector
 from bankmon.config import Config
 from bankmon.status import RunView, effective_state
@@ -92,6 +99,18 @@ def file_lock(lock_path: Path) -> Iterator[None]:
 
 
 MAX_FUTURE_SKEW = timedelta(minutes=2)
+MAX_SERVICES = 1000
+SERVICE_TEXT_LEN = 200
+_SHA256 = re.compile(r"[0-9a-f]{64}")
+# URL da aba lida: http(s), sem espacos/controle, sem userinfo, query string nem fragmento.
+_SOURCE_URL = re.compile(r"https?://[^\s?#@\x00-\x1f]{1,480}")
+# campo do ServiceRecord -> validador da geometria (valor valido deve voltar identico)
+_GEOMETRY_VALIDATORS = {
+    "svg_viewbox": svg_geometry.validate_viewbox,
+    "svg_width": svg_geometry.validate_dimension,
+    "svg_height": svg_geometry.validate_dimension,
+    "svg_path_d": svg_geometry.validate_path_d,
+}
 
 
 def _is_aware(dt: object) -> bool:
@@ -139,7 +158,72 @@ def _validate(
         if obs.institution_id in seen:
             return "observação duplicada"
         seen.add(obs.institution_id)
+    return _validate_services(result, valid_ids) or _validate_source(result.source)
+
+
+def _validate_services(result: CollectionResult, valid_ids: set[str]) -> str | None:
+    services = result.services
+    if not isinstance(services, (tuple, list)):
+        return "services não é sequência"
+    if len(services) > MAX_SERVICES:
+        return f"mais de {MAX_SERVICES} serviços"
+    positions: set[int] = set()
+    for svc in services:
+        if not isinstance(svc, ServiceRecord):
+            return "serviço não é ServiceRecord"
+        if not isinstance(svc.position, int) or isinstance(svc.position, bool) or svc.position < 0:
+            return "position do serviço inválida"
+        if svc.position in positions:
+            return "position de serviço duplicada"
+        positions.add(svc.position)
+        if not isinstance(svc.service, str):
+            return "nome do serviço não é str"
+        for name in ("status_original", "issue"):
+            value = getattr(svc, name)
+            if value is not None and not isinstance(value, str):
+                return f"{name} do serviço não é str"
+        if svc.status not in SERVICE_STATUSES:
+            return "status de serviço inválido"
+        if svc.color is not None and svc.color not in SERVICE_COLORS:
+            return "color de serviço inválida"
+        if not isinstance(svc.consistent, bool):
+            return "consistent do serviço não é bool"
+        if svc.institution_id is not None and svc.institution_id not in valid_ids:
+            return "instituição do serviço desconhecida/desabilitada"
+        for name, validate in _GEOMETRY_VALIDATORS.items():
+            value = getattr(svc, name)
+            if value is not None and validate(value) != value:
+                return f"geometria inválida em {name}"
     return None
+
+
+def _validate_source(source: object) -> str | None:
+    if source is None:
+        return None
+    if not isinstance(source, SourceInfo):
+        return "source não é SourceInfo"
+    if not isinstance(source.file_name, str) or not source.file_name:
+        return "file_name inválido"
+    if any(c in source.file_name for c in "/\\:") or Path(source.file_name).name != source.file_name:
+        return "file_name com caminho"
+    if not isinstance(source.sha256, str) or not _SHA256.fullmatch(source.sha256):
+        return "sha256 inválido"
+    if not isinstance(source.size_bytes, int) or isinstance(source.size_bytes, bool) or source.size_bytes < 0:
+        return "size_bytes inválido"
+    if not _is_aware(source.captured_at):
+        return "captured_at sem fuso horário"
+    if source.kind not in SOURCE_KINDS:
+        return "kind da origem inválido"
+    if source.kind == "browser":
+        if not isinstance(source.url, str) or not _SOURCE_URL.fullmatch(source.url):
+            return "url da origem inválida (esperada http(s) sem query string)"
+    elif source.url is not None:
+        return "url só é permitida na origem do navegador"
+    return None
+
+
+def _safe_opt(text: str | None) -> str | None:
+    return safe_text(text, SERVICE_TEXT_LEN) if text else None
 
 
 def _sanitize(
@@ -166,6 +250,20 @@ def _sanitize(
                 dataclasses.replace(o, detail=safe_text(o.detail) if o.detail else None)
                 for o in result.observations
             ),
+            services=tuple(
+                dataclasses.replace(
+                    v,
+                    service=safe_text(v.service, SERVICE_TEXT_LEN),
+                    status_original=_safe_opt(v.status_original),
+                    issue=_safe_opt(v.issue),
+                )
+                for v in result.services
+            ),
+            source=(
+                dataclasses.replace(result.source, file_name=safe_text(result.source.file_name, SERVICE_TEXT_LEN))
+                if result.source is not None
+                else None
+            ),
         )
     log.error("Resultado inválido do coletor: %s", safe_text(problem))
     # Resultado novo (sem replace): `result` pode nem ser um CollectionResult.
@@ -187,8 +285,12 @@ def record_result(
     trigger: str,
     clock: Clock | None = None,
     expected_collector: str | None = None,
+    on_record: Callable[[sqlite3.Connection], None] | None = None,
 ) -> RunOutcome:
     """Grava run + observations + state_transitions numa unica transacao.
+
+    `on_record(conn)` roda DENTRO da transacao, logo apos inserir a execucao: se ele ou qualquer
+    gravacao seguinte falhar, tudo (inclusive o que `on_record` fez) volta atras.
 
     A transicao compara o estado efetivo imediatamente antes (com expiracao
     aplicada em `finished_at`) com o estado depois, por instituicao habilitada.
@@ -203,7 +305,13 @@ def record_result(
         at = result.finished_at
         previous = db.latest_run(conn)
         run_id = db.insert_run(conn, result, trigger)
+        if on_record is not None:
+            on_record(conn)
         db.insert_observations(conn, run_id, result.observations)
+        if result.source is not None:
+            db.insert_run_source(conn, run_id, result.source, clock())
+        if result.services:
+            db.insert_run_services(conn, run_id, result.services)
         current = RunView(
             run_id=run_id,
             finished_at=at,
@@ -241,6 +349,20 @@ def _collect_safely(
         )
 
 
+def collect_and_record(
+    conn: sqlite3.Connection,
+    cfg: Config,
+    collector: Collector,
+    trigger: str,
+    clock,
+    on_record: Callable[[sqlite3.Connection], None] | None = None,
+) -> RunOutcome:
+    """Coleta e grava (numa transacao) com a conexao dada. O CHAMADOR deve segurar `file_lock`:
+    serve a quem precisa de outras leituras/gravacoes na mesma secao critica (ex.: estado da coleta)."""
+    result = _collect_safely(collector, conn, cfg, clock)
+    return record_result(conn, cfg, result, trigger, clock, collector.name, on_record=on_record)
+
+
 def run_collection(
     cfg: Config,
     trigger: str,
@@ -257,8 +379,7 @@ def run_collection(
         try:
             if collector is None:
                 collector = create_collector(cfg.collector, seed=cfg.demo_seed, clock=clock)
-            result = _collect_safely(collector, conn, cfg, clock)
-            outcome = record_result(conn, cfg, result, trigger, clock, collector.name)
+            outcome = collect_and_record(conn, cfg, collector, trigger, clock)
         finally:
             conn.close()
     log.info(

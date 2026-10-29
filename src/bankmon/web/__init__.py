@@ -1,23 +1,27 @@
-"""Dashboard web (Flask): somente leitura, somente GET, somente loopback.
+"""Dashboard web (Flask): somente loopback; somente GET/HEAD, salvo com `coleta_api=True`.
 
-O dashboard nunca grava no banco: abre uma conexao `mode=ro` por requisicao e
+Sem `coleta_api` (padrao) so existem rotas GET. Com `coleta_api=True` (`serve --navegador`) entram
+os POSTs da coleta pelo navegador (`collect_api`: leituras com token e a retomada com CSRF).
+
+O dashboard nunca grava no banco (as gravacoes da coleta ficam em `bankmon.browser_service`): abre uma conexao `mode=ro` por requisicao e
 calcula todos os estados via `bankmon.status`.
 """
 
 from __future__ import annotations
 
 import re
+import secrets
 from datetime import datetime
 from pathlib import Path
 from typing import Callable
 
-from flask import Flask, render_template, request, send_from_directory
+from flask import Flask, jsonify, render_template, request, send_from_directory
 from flask.globals import request_ctx
 from werkzeug.exceptions import HTTPException
 
 from bankmon.config import Config
 from bankmon.timeutil import utc_now
-from bankmon.web import views
+from bankmon.web import collect_api, views
 
 # "[::1]" nao entra aqui: o Werkzeug nunca o casa (bug no parse de IPv6); o caso e coberto
 # pelo wrapper `_normalize_host`, que o reescreve para "localhost" antes da checagem.
@@ -38,6 +42,9 @@ SECURITY_HEADERS = {
 }
 
 ERROR_TEXTS = {
+    403: ("Acesso negado", "A requisição não foi autorizada."),
+    409: ("Ação indisponível", "A coleta foi suspensa e só volta após revisão da autorização."),
+    503: ("Coleta em andamento", "Outra coleta está em andamento; tente novamente em instantes."),
     400: ("Requisição inválida", "O endereço usado para acessar o painel não é permitido."),
     404: ("Página não encontrada", "O endereço não existe ou a instituição não está configurada."),
     405: ("Método não permitido", "Este painel é somente leitura."),
@@ -67,7 +74,18 @@ def _normalize_host(wsgi_app):
     return middleware
 
 
-def create_app(cfg: Config, clock: Callable[[], datetime] = utc_now) -> Flask:
+def create_app(
+    cfg: Config,
+    clock: Callable[[], datetime] = utc_now,
+    coleta_api: bool = False,
+    coleta_token: str | None = None,
+) -> Flask:
+    """`coleta_api=True` (so `serve --navegador`) liga as rotas de POST da coleta pelo navegador;
+    sem isso o painel continua somente GET/HEAD."""
+    if coleta_api and not cfg.is_browser:
+        raise ValueError("a API de coleta só existe no modo navegador (coletor 'navegador')")
+    if coleta_api and not coleta_token:
+        raise ValueError("a API de coleta exige um token (coleta_token)")
     app = Flask(__name__, static_folder=None)  # /static registrada abaixo (so GET/HEAD)
     app.config["TRUSTED_HOSTS"] = list(TRUSTED_HOSTS)
     app.config["DEBUG"] = False
@@ -110,11 +128,14 @@ def create_app(cfg: Config, clock: Callable[[], datetime] = utc_now) -> Flask:
             # (url_for falharia); devolve uma pagina minima estatica.
             body = f"<!doctype html><meta charset=utf-8><title>{title}</title><h1>{title}</h1><p>{text}</p>"
             return body, code
-        html = render_template("error.html", code=code, title=title, text=text, demo=cfg.is_demo)
+        html = render_template("error.html", code=code, title=title, text=text, demo=cfg.is_demo,
+                               offline_banner=views.offline_banner(cfg, None))
         return html, code
 
     @app.errorhandler(HTTPException)
     def http_error(exc: HTTPException):
+        if coleta_api and request.path.startswith("/api/"):
+            return jsonify(erro=exc.name), exc.code or 500
         resp = error_page(exc.code or 500)
         if exc.code == 405 and exc.valid_methods:
             return resp[0], 405, {"Allow": ", ".join(exc.valid_methods)}
@@ -122,6 +143,8 @@ def create_app(cfg: Config, clock: Callable[[], datetime] = utc_now) -> Flask:
 
     @app.errorhandler(500)
     def server_error(_exc):
+        if coleta_api and request.path.startswith("/api/"):
+            return jsonify(erro="erro interno"), 500  # sem detalhes (o traceback fica so no log)
         return error_page(500)
 
     @app.after_request
@@ -131,6 +154,11 @@ def create_app(cfg: Config, clock: Callable[[], datetime] = utc_now) -> Flask:
         if request.endpoint != "static":
             response.headers["Cache-Control"] = "no-store"
         return response
+
+    if coleta_api:
+        csrf_token = secrets.token_urlsafe(32)  # por processo; vai num campo oculto do formulario
+        app.context_processor(lambda: {"csrf_token": csrf_token})
+        collect_api.register(app, cfg, clock, coleta_token, csrf_token, error_page)
 
     app.wsgi_app = _normalize_host(app.wsgi_app)  # type: ignore[method-assign]
     return app

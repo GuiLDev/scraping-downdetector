@@ -544,7 +544,40 @@ def test_responses_have_no_server_internals(seeded):
 
 
 def _snapshot(dirpath):
-    return {p.name: (p.stat().st_size, p.stat().st_mtime_ns) for p in sorted(dirpath.iterdir())}
+    """Arquivos do diretorio de dados -> (tamanho, mtime).
+
+    Antivirus (aqui, Kaspersky) cria e apaga em milissegundos copias temporarias como
+    `BANKMON-DEMO.DB-SHM.tmp` ao lado dos arquivos do SQLite. Elas podem sumir entre o
+    iterdir() e o stat() (FileNotFoundError intermitente); nao sao do app e sao ignoradas.
+    O que o teste garante (bytes e tamanho do banco, nenhum arquivo novo alem de -wal/-shm)
+    continua estrito.
+    """
+    snap = {}
+    for p in sorted(dirpath.iterdir()):
+        if p.suffix.lower() == ".tmp":
+            continue
+        try:
+            st = p.stat()
+        except FileNotFoundError:
+            continue  # sumiu durante a listagem (arquivo transitorio de terceiros)
+        snap[p.name] = (st.st_size, st.st_mtime_ns)
+    return snap
+
+
+def test_snapshot_ignores_third_party_transient_files(tmp_path, monkeypatch):
+    (tmp_path / "bankmon-demo.db").write_bytes(b"x")
+    (tmp_path / "BANKMON-DEMO.DB-SHM.tmp").write_bytes(b"y")  # copia de antivirus
+    sumiu = tmp_path / "bankmon-demo.db-wal"
+    sumiu.write_bytes(b"z")
+    real_stat = type(sumiu).stat
+
+    def stat_que_some(self, *a, **kw):  # simula o arquivo apagado entre iterdir() e stat()
+        if self.name == sumiu.name:
+            raise FileNotFoundError(self)
+        return real_stat(self, *a, **kw)
+
+    monkeypatch.setattr(type(sumiu), "stat", stat_que_some)
+    assert set(_snapshot(tmp_path)) == {"bankmon-demo.db"}
 
 
 def test_get_all_routes_never_changes_database_files(history_cfg):

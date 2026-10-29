@@ -26,6 +26,7 @@ SYNTHETIC = "DEMO: dado sintético"
 class DemoCollector:
     name = "demo"
     is_demo = True
+    data_kind = "demo"
 
     def __init__(self, seed: int = 0, clock: Clock = utc_now) -> None:
         self._seed = seed

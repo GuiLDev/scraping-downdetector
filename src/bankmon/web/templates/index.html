@@ -2,6 +2,13 @@
 {% from "_macros.html" import state_badge, demo_badge %}
 {% block title %}Painel{% endblock %}
 {% block content %}
+{% if coleta_paused and csrf_token is defined %}
+<form class="resume-form" method="post" action="{{ url_for('resume_collection') }}">
+  <input type="hidden" name="csrf" value="{{ csrf_token }}">
+  <button type="submit">Retomar verificação</button>
+</form>
+{% endif %}
+
 <section class="summary" aria-label="Resumo da verificação">
   <p><strong>Última verificação válida:</strong> {{ header.last_ok }}</p>
   <p><strong>Próxima verificação prevista:</strong> {{ header.next }}</p>
@@ -51,7 +58,9 @@
     <article class="card {{ c.css }}">
       <h4 class="card-name"><a href="{{ url_for('institution', institution_id=c.id) }}">{{ c.name }}</a></h4>
       <p class="card-state">{{ state_badge(c.css, c.icon, c.label) }}{% if c.demo %} {{ demo_badge() }}{% endif %}</p>
-      <p class="card-since muted">{% if c.since %}desde {{ c.since }}{% else %}&nbsp;{% endif %}</p>
+      <p class="card-since muted">{% if c.since %}{{ c.since }}{% else %}&nbsp;{% endif %}</p>
+      {% if c.stale_reading %}<p class="card-since muted">{{ c.stale_reading }}</p>{% endif %}
+      {% if c.chart %}<svg class="dd-chart dd-chart-{{ c.chart.color }}" viewBox="{{ c.chart.viewbox }}" preserveAspectRatio="none" role="img" aria-label="Relatos de {{ c.name }} nas últimas 24 horas segundo o Downdetector"><path d="{{ c.chart.d }}"/></svg>{% endif %}
     </article>
     {% endfor %}
   </div>
