@@ -19,6 +19,8 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=9"]
+# Testes E2E com navegador real (extensao no Edge); fora da suite padrao (-m e2e)
+e2e = ["playwright>=1.64"]
 
 [project.scripts]
 bankmon = "bankmon.cli:main"
@@ -31,3 +33,5 @@ bankmon = ["schema.sql", "web/templates/*.html", "web/static/**/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+addopts = "-m 'not e2e'"
+markers = ["e2e: testes com navegador real (Playwright + extensao); rode com -m e2e"]
