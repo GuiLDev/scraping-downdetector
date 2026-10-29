@@ -91,6 +91,12 @@ Essas regras também estão em `.claude/agents/scraping-specialist.md`.
 3. Confirmar com o jurídico se dados, cores ou capturas do Downdetector podem ser citados nos comunicados aos clientes.
 4. Com a autorização registrada aqui (data, escopo, referência do contrato ou e-mail), o `scraping-specialist` implementa o coletor correspondente, seguido de `qa-tester` e `security-reviewer`.
 
+## Autorizações registradas
+
+Uma origem externa na coleta pelo navegador (`[coleta_navegador]` no TOML) só é aceita se o `autorizacao_ref` for igual a um identificador listado aqui, no formato `- `ID`: data, escopo, referência do contrato ou e-mail`. A frequência máxima para origem externa é 1 leitura por hora, e um desafio de verificação suspende a coleta até revisão desta autorização.
+
+Nenhuma autorização registrada até agora (origem externa sempre recusada).
+
 ## Referências
 
 - Documentação de integração Sumo Logic × Downdetector (API Enterprise): https://www.sumologic.com/help/docs/integrations/automation-integrations/downdetector/

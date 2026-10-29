@@ -6,7 +6,9 @@ Dashboard local que mostra, para uma lista configurável de bancos, carteiras e 
 
 ## Status atual
 
-- **Etapa 1 (concluída): dashboard, banco, CLI e agendamento, com dados de demonstração.** Tudo o que aparece hoje é sintético e vem marcado como "DADOS DE DEMONSTRAÇÃO". Nenhum dado do Downdetector é coletado.
+- **Etapa 1 (concluída): dashboard, banco, CLI e agendamento, com dados de demonstração.** No modo padrão tudo é sintético e vem marcado como "DADOS DE DEMONSTRAÇÃO"; nenhum dado do Downdetector é coletado.
+- **Importação offline de HTML salvo manualmente** (`import-html`, banco separado `bankmon-offline.db`): o parser lê um arquivo local que você mesmo salvou; não há acesso à rede.
+- **Coleta pela aba do navegador (extensão), hoje só para origens locais configuradas** (páginas de teste em loopback, listadas em `[coleta_navegador]`). Nenhuma origem externa está autorizada.
 - **Etapa 2 (coletor real): pendente de autorização do Downdetector.** O site responde 403 com desafio do Cloudflare para clientes automatizados, e este projeto **não contorna proteções** (sem evasão de Cloudflare/CAPTCHA, sem navegador headless para burlar bloqueio, sem proxy rotativo, sem reaproveitar cookies de terceiros). O coletor real só será implementado por um canal autorizado. Detalhes em [`docs/etapa2-viabilidade-coletor.md`](docs/etapa2-viabilidade-coletor.md).
 
 ## Requisitos e instalação
@@ -34,13 +36,20 @@ pip-compile --allow-unsafe --generate-hashes --extra dev --all-build-deps --outp
 
 Os comandos agendados usam `python -P -m bankmon ...`: `-P` (Python 3.11+) impede que a pasta de trabalho entre em `sys.path`, evitando que um arquivo como `random.py` na raiz sobreponha a biblioteca padrão. Use `-P` também nos seus comandos manuais, se quiser a mesma proteção.
 
+Para os testes E2E (Playwright com o Edge instalado, `channel="msedge"`), instale também o lock próprio, com hashes:
+
+```powershell
+.venv\Scripts\python -m pip install --require-hashes -r requirements-e2e.lock
+```
+
 ## Comandos da CLI
 
 `python -P -m bankmon <comando>` (ou `bankmon <comando>` com o venv ativo):
 
 | Comando | O que faz |
 |---|---|
-| `serve` | Sobe o dashboard em `server.host:server.port` (padrão `127.0.0.1:8765`). |
+| `serve [--offline\|--navegador]` | Sobe o dashboard em `server.host:server.port` (padrão `127.0.0.1:8765`). `--navegador` liga a API da coleta pela aba do navegador. |
+| `extensao --alvo URL [--intervalo MIN]` | Gera a extensão do navegador pronta para carregar em `data/extensao-coletor/` (`--alvo` obrigatório, origem listada em `[coleta_navegador]`). |
 | `init-db` | Cria o banco e sincroniza categorias e instituições a partir do TOML. |
 | `check-config` | Valida o TOML e mostra um resumo. Não cria banco nem logs. |
 | `collect [--trigger scheduled\|cli]` | Executa uma coleta com o coletor ativo e grava a execução, mesmo em caso de falha. Usa lock para não sobrepor execuções. |
@@ -103,6 +112,57 @@ Somente leitura, em `http://127.0.0.1:8765/`:
 
 O servidor não tem JavaScript externo nem recursos de terceiros (bibliotecas e fontes ficam em `static/`, ver `static/VENDORED.md`).
 
+### Validação offline (HTML exportado manualmente)
+
+Para conferir o parser com dados reais **sem coleta automatizada**, importe um HTML da página inicial do Downdetector salvo manualmente pelo navegador:
+
+```powershell
+.venv\Scripts\python -P -m bankmon import-html C:\caminho\pagina.html [--capturado-em 2026-10-28T10:53:00-03:00]
+.venv\Scripts\python -P -m bankmon status --offline
+.venv\Scripts\python -P -m bankmon serve --offline
+```
+
+- Os dados vão para um banco **separado**, `data/bankmon-offline.db`. O banco demo e o operacional não são tocados.
+- O horário da execução é o **horário da captura**: a data de modificação do arquivo, ou `--capturado-em` (com fuso obrigatório).
+- No modo `--offline`, o relógio fica congelado nessa captura. A dashboard mostra a faixa "DADOS HISTÓRICOS DE VALIDAÇÃO OFFLINE". Não é monitoramento ao vivo.
+- A mesma página (mesmo SHA-256) não é importada duas vezes.
+- Todos os serviços da página ficam em `run_services`, com a geometria SVG validada e sem o `stroke` cru. As instituições configuradas são localizadas pelo `dd_label`.
+- O arquivo HTML real **não** deve entrar no git (`.gitignore` cobre `downdetector*.html` e HTML na raiz).
+
+### Coleta pela aba do navegador (extensão, com intervenção humana)
+
+Extensão → servidor Flask → parser → SQLite → dashboard, **sem robô de rede**: a extensão só recarrega e lê a aba que **você** abriu e envia o HTML ao servidor local. Os dados vão para `data/bankmon-navegador.db` (os demais bancos não são tocados).
+
+```powershell
+.venv\Scripts\python -P -m bankmon extensao --alvo http://127.0.0.1:8777/dd --intervalo 5
+.venv\Scripts\python -P -m bankmon serve --navegador
+```
+
+1. Rode `extensao`: ela cria o token em `data/coleta-token.txt` (reaproveitado nas próximas vezes) e escreve a extensão em `data/extensao-coletor/` (`manifest.json`, `background.js` e `config.json` com servidor, token, alvo e intervalo). `data/` é ignorado pelo git; o modelo versionado em `extension/coletor/` não tem segredos.
+2. No Opera GX, Edge ou Chrome, abra a página de extensões, ative o modo desenvolvedor e use "Carregar sem pacote" (Opera: "Carregar descompactada") apontando para `data/extensao-coletor/`.
+3. Abra a aba do alvo e rode `serve --navegador`. A cada intervalo (mínimo 0,5 min) a extensão consulta o estado, **reserva a vaga no servidor** (que aplica o intervalo mínimo) e só então recarrega a aba **sem trazê-la para a frente**, espera a página estabilizar (até 45 s) e envia o HTML. Funciona sem o Claude Code rodando. Para testar sem o Downdetector, use `python tests/e2e/sim_server.py` (páginas de simulação em `http://127.0.0.1:8777/dd`; modos em `/_sim/modo?valor=normal_a|normal_b|bloqueio`; a página `bloqueio` tem o botão "Sou humano (simulação)", cujo clique a devolve ao conteúdo normal; `/_sim/contagem` informa quantas vezes a página foi pedida).
+
+**Origens autorizadas (lista explícita).** Não há origem implícita: só valem as origens **exatas** (`esquema://host:porta`, sem curinga) listadas em `[coleta_navegador] origens_autorizadas`. Sem a lista, `serve --navegador` não sobe (erro de configuração), `extensao` recusa o alvo e a API responde 403. Origem loopback dispensa `autorizacao_ref`; origem externa exige um identificador registrado (veja abaixo). `config/institutions.toml` não traz a seção: crie-a no TOML que você usa (por exemplo, via `BANKMON_CONFIG`).
+
+```toml
+[coleta_navegador]
+origens_autorizadas = ["http://127.0.0.1:8777"]   # páginas de teste locais
+intervalo_minimo_local_s = 30                     # intervalo mínimo entre recargas em loopback (padrão 30; 0 nos testes)
+# origem externa (somente com autorização registrada):
+# origens_autorizadas = ["https://exemplo.test"]
+# autorizacao_ref = "identificador da autorização"
+```
+
+**Reserva antes da recarga (SEC-014).** `GET /api/coleta/estado?alvo=URL` (o `alvo` é obrigatório: 400 se faltar, 403 se não estiver na lista) só consulta: devolve `estado`, `pode_reservar` e `proxima_leitura_em`. Antes de recarregar, a extensão chama `POST /api/coleta/reserva` (`{alvo}`): o servidor, numa transação `BEGIN IMMEDIATE` sob o lock da coleta, responde **429** com `Retry-After` se o intervalo desde a última reserva não passou, **409** `reserva_ativa` se já há uma reserva aberta, **409** `pausado` se a coleta está pausada; senão devolve `{reserva_id, expira_em}` (validade de 2 min). Em 429 ou 409 a extensão **não recarrega**. `POST /api/coleta` exige o `reserva_id` (mesma origem, não consumido, não expirado) e o consome na mesma transação que grava a leitura; sem reserva válida, 429. O limite vem da tabela `collector_reservations` (schema v4), então sobrevive a reinícios. Intervalo: origem externa, 60 min fixos; loopback, `intervalo_minimo_local_s`.
+
+**Pausa e retomada (sem recarga).** Se a página vier como desafio de bloqueio, a execução é gravada como `inaccessible` e a coleta fica `pausada`: a dashboard avisa, mantém os cartões em "Sem dados" (com a "Última leitura válida (desatualizada)" só como texto) e a API recusa reservas e leituras (409). Resolva o bloqueio **manualmente** na aba e clique em "Retomar verificação": isso só passa o estado a `verificando`, **sem recarregar** a página. Nesse estado a extensão lê o DOM **já aberto** na aba, sem `tabs.reload` e sem reservar, e o envia com `modo: "verificacao"` (o servidor só aceita esse modo no estado `verificando` e só em origem loopback). DOM ok volta a `ativo`; ainda bloqueado volta a `pausada`. A recarga automática seguinte segue o fluxo normal e respeita o intervalo mínimo desde a última recarga.
+
+**Origem externa (travas de política).** Além de `autorizacao_ref`, que precisa ser um identificador listado em "Autorizações registradas" de `docs/etapa2-viabilidade-coletor.md` (hoje não há nenhum, então origem externa é sempre recusada), valem: intervalo mínimo fixo de 60 min no `extensao` e no servidor (reserva recusada com 429 se a mesma origem foi reservada há menos de 1 h) e, se a fonte exibir um desafio, a coleta fica **suspensa** (`suspenso_por_desafio`): a dashboard não oferece retomada e `/coleta/retomar` responde 409 até a autorização ser revista. Três leituras seguidas sem sucesso também pausam a coleta: em origem local (`falhas_consecutivas`) há retomada manual; em origem externa (`falhas_consecutivas_externa`) a coleta fica suspensa como no desafio (sem retomada, 409), e só reconfiguração a reativa. A extensão informa o alvo ao servidor e, com 401/403, cancela o próprio alarme.
+
+**API** (somente com `serve --navegador`; nos demais modos as rotas não existem): `POST /api/coleta/reserva`, `POST /api/coleta` e `GET /api/coleta/estado` exigem o cabeçalho `X-BankMonitor-Token`; `POST /coleta/retomar` usa token CSRF. O token nunca é logado nem devolvido.
+
+**O que a extensão nunca faz:** ler ou enviar cookies, interagir com a página, resolver CAPTCHA ou desafio, abrir/ativar abas ou janelas. Veja os comentários de `extension/coletor/background.js`.
+
 ## Agendamento
 
 Runbook completo em [`docs/operacao.md`](docs/operacao.md).
@@ -138,7 +198,9 @@ loginctl enable-linger "$USER"    # para rodar sem sessão aberta
 ## Segurança
 
 - O servidor escuta **somente em loopback** e **não tem autenticação**. **Não exponha** a porta em rede (sem port-forward, proxy reverso ou `host` diferente de loopback).
-- O dashboard envia Content-Security-Policy restritiva (`default-src 'self'`, sem scripts ou estilos inline, sem frames e sem formulários), autoescape do Jinja e SQL sempre parametrizado.
+- O dashboard envia Content-Security-Policy restritiva (`default-src 'self'`, sem scripts ou estilos inline, sem frames e `form-action 'self'`: o único formulário é o POST de retomada, protegido por token CSRF), autoescape do Jinja e SQL sempre parametrizado.
+- Com `serve --navegador`, as rotas de POST da coleta exigem o token `X-BankMonitor-Token` (em `data/coleta-token.txt`, fora do git; nunca logado nem devolvido) e a retomada exige CSRF.
+- Quatro bancos separados em `data/`: `bankmon-demo.db` (demonstração), `bankmon-offline.db` (importação de HTML), `bankmon-navegador.db` (coleta pelo navegador) e `bankmon.db` (operacional, reservado ao coletor autorizado). Nenhum modo toca nos demais.
 - A Etapa 1 não usa nenhum segredo. `.env` fica fora do git (`.gitignore`); `.env.example` só documenta nomes de variáveis. Se a Etapa 2 exigir credenciais de um canal autorizado, elas entram por variável de ambiente, nunca no código.
 - Textos vindos de coletores são sanitizados antes de gravar ou exibir.
 
@@ -146,11 +208,16 @@ loginctl enable-linger "$USER"    # para rodar sem sessão aberta
 
 ```
 config/institutions.toml   configuração (categorias, instituições, agenda)
-src/bankmon/               cli, config, db, runner (lock), status (regras), collectors/, web/
+src/bankmon/               cli, config, db, runner (lock), status (regras), collectors/, web/, extension, origins, browser_service
+extension/coletor/         modelo da extensão do navegador (sem segredos)
+.claude/skills/            skills do projeto (webapp-testing, tdd, diagnosing-bugs; versões fixadas em skills-lock.json)
+CLAUDE.md                  regras do projeto (fonte de dados, skills, operação)
 scripts/windows/           register-tasks.ps1, unregister-tasks.ps1, start-dashboard.cmd
 scripts/linux/             unidades systemd --user (collect service/timer, serve service)
 docs/                      operação e viabilidade da Etapa 2
 tests/                     testes (pytest)
+tests/e2e/                 E2E com Edge + extensão e simulador local (pytest -m e2e)
+tests/js/                  harness Node do background.js da extensão
 data/                      banco, logs e backups (ignorado pelo git)
 .claude/agents/            agentes do projeto
 ```
@@ -163,11 +230,15 @@ Agentes do projeto (`.claude/agents/`): `scraping-specialist` (Etapa 2, só por 
 .venv\Scripts\python -m pytest
 ```
 
-Os testes usam diretórios temporários e nunca tocam em `data/`. O pytest já vem de `requirements.lock`.
+Os testes usam diretórios temporários e nunca tocam em `data/`. O pytest já vem de `requirements.lock`. Os testes E2E com navegador real (`pip install -e .[e2e]`) ficam fora da suíte padrão: `python -m pytest -m e2e`. Os testes do `background.js` usam Node.js (são pulados se ele não existir).
 
 ## Limitações e próximos passos
 
-- Só há dados de demonstração; o coletor real depende de autorização do Downdetector (Etapa 2).
+- O coletor real depende de autorização do Downdetector (Etapa 2). Hoje há dados de demonstração, importação offline de HTML salvo manualmente e coleta pela aba do navegador apenas para origens locais configuradas.
 - Uma única máquina, um usuário, sem autenticação: não é um serviço para rede.
 - No Windows, com o PC desligado ou suspenso não há coleta; as horas perdidas ficam como lacuna.
 - Próximos passos: coletor autorizado, confirmação dos `dd_label` reais e, se necessário, alertas e controle de acesso.
+- Pendências informativas da revisão de segurança da coleta pelo navegador (não afetam o uso local; tratar antes de autorizar uma origem externa):
+  - **INF-01:** o estado da coleta (`collector_state`) é global, não por origem. Com loopback e origem externa na mesma configuração, uma retomada no loopback também libera a reserva da externa; o limite de 60 min continua valendo, então não há recarga extra. Ação: guardar o estado por origem ou proibir loopback e externa na mesma configuração.
+  - **INF-02:** a tabela `collector_reservations` cresce sem limpeza (uma linha por reserva). Ação: apagar periodicamente as reservas consumidas ou expiradas, mantendo a mais recente de cada origem.
+  - **INF-03:** a contagem de falhas desde a retomada usa `finished_at >= desde`; se o bloqueio e a retomada caírem no mesmo segundo, a pausa vem uma leitura antes. É conservador e não é explorável. Ação opcional: usar `>`.
