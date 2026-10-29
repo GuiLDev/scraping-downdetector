@@ -28,3 +28,7 @@ credentials*.json
 *.har
 downdetector*.html
 /*.png
+# Segredos da extensao do navegador (token e config gerados)
+extension/**/config.json
+**/coleta-token.txt
+**/extensao-coletor/
