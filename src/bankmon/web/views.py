@@ -20,6 +20,7 @@ from bankmon.browser_service import (
     EXTERNAL_FAILURES_REASON,
     NO_RESUME_REASONS,
     SUSPENDED_REASON,
+    effective_collector_state,
 )
 from bankmon.collectors import svg_geometry
 from bankmon.config import Config
@@ -216,7 +217,7 @@ def load_snapshot(cfg: Config) -> Snapshot:
             last_ok=last_ok,
             last_transitions=last_transitions,
             charts=_load_charts(conn, latest, last_ok),
-            coleta=db.get_collector_state(conn) if cfg.is_browser else None,
+            coleta=effective_collector_state(cfg, db.get_collector_state(conn)) if cfg.is_browser else None,
         )
 
     state, snap = read_db(cfg, reader)

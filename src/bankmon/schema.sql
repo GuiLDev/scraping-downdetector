@@ -120,4 +120,13 @@ CREATE TABLE collector_reservations (
 );
 CREATE INDEX idx_reservations_origin ON collector_reservations (origin, reserved_at);
 
-PRAGMA user_version = 4;
+-- @v5 (aditivo: um banco v4 migra executando so esta parte)
+-- Id da ultima execucao gravada quando o estado da coleta mudou: as falhas "desde a retomada" sao
+-- as execucoes de id maior (runs.id e AUTOINCREMENT). O horario, com resolucao de 1 s, nao separa
+-- eventos do mesmo segundo. Na migracao, a fronteira e a ultima execucao ANTES de `desde` (mesma
+-- regra conservadora da v4: o que aconteceu a partir da retomada continua contando).
+ALTER TABLE collector_state ADD COLUMN apos_execucao INTEGER NOT NULL DEFAULT 0;
+UPDATE collector_state SET apos_execucao =
+    (SELECT COALESCE(MAX(id), 0) FROM runs WHERE finished_at < collector_state.desde);
+
+PRAGMA user_version = 5;

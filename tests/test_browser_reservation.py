@@ -189,6 +189,19 @@ def test_reservation_of_another_origin_is_refused(env):
     assert env.post(page_html(), url="http://localhost:9100/dd", reserva_id=rid).status_code == 200
 
 
+def test_each_new_reservation_prunes_the_closed_ones_of_the_same_origin(env):
+    """INF-02: so a reserva mais recente de cada origem fica gravada (o intervalo conta dela)."""
+    rebuild(env, browser_origins=("http://127.0.0.1:8777", "http://localhost:9100"))
+    assert env.post(page_html(), url="http://localhost:9100/dd").status_code == 200  # outra origem
+    assert env.post(page_html()).status_code == 200  # consumida
+    assert env.reserve().status_code == 200  # nunca consumida: expira em 2 min
+    env.now = NOW + 3 * MIN
+    rid = env.reserve().get_json()["reserva_id"]  # aberta
+    assert env.rows("SELECT id FROM collector_reservations WHERE origin = 'http://127.0.0.1:8777'") == [(rid,)]
+    assert len(env.rows("SELECT id FROM collector_reservations WHERE origin = 'http://localhost:9100'")) == 1
+    assert env.post(page_html(), reserva_id=rid).status_code == 200
+
+
 def test_consumption_is_atomic_with_the_recording(env, monkeypatch):
     rid = env.reserve().get_json()["reserva_id"]
     original = db.insert_run_services

@@ -120,14 +120,14 @@ def _v2_db(path):
     conn.close()
 
 
-def test_v2_database_migrates_to_v4_without_losing_data(tmp_path):
+def test_v2_database_migrates_to_v5_without_losing_data(tmp_path):
     path = tmp_path / "v2.db"
     _v2_db(path)
     conn = db.connect(path)
     try:
         db.init_db(conn)
         db.init_db(conn)  # idempotente
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 4
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 5
         row = conn.execute("SELECT kind, file_name, sha256, url FROM run_sources").fetchone()
         assert tuple(row) == ("html_offline", "a.html", "ab" * 32, None)
         assert conn.execute("SELECT count(*) FROM run_services").fetchone()[0] == 1
@@ -149,7 +149,7 @@ def test_v2_database_migrates_to_v4_without_losing_data(tmp_path):
         conn.close()
 
 
-def test_v1_database_migrates_to_v4(tmp_path):
+def test_v1_database_migrates_to_v5(tmp_path):
     path = tmp_path / "v1.db"
     conn = sqlite3.connect(path)
     conn.executescript(db.SCHEMA_PATH.read_text("utf-8").split(db.V2_MARKER)[0] + "PRAGMA user_version = 1;")
@@ -157,7 +157,7 @@ def test_v1_database_migrates_to_v4(tmp_path):
     conn = db.connect(path)
     try:
         db.init_db(conn)
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 4
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 5
         assert conn.execute("SELECT count(*) FROM collector_state").fetchone()[0] == 0
     finally:
         conn.close()
@@ -202,7 +202,7 @@ def test_runner_rejects_browser_source_url_with_query(tmp_path, monkeypatch):
     assert out.result.source_status == "error"
 
 
-def test_v3_database_migrates_to_v4_adding_reservations_and_keeping_data(tmp_path):
+def test_v3_database_migrates_to_v5_adding_reservations_and_keeping_data(tmp_path):
     path = tmp_path / "v3.db"
     conn = sqlite3.connect(path)
     conn.executescript(db.SCHEMA_PATH.read_text("utf-8").split(db.V4_MARKER)[0] + "PRAGMA user_version = 3;")
@@ -213,9 +213,40 @@ def test_v3_database_migrates_to_v4_adding_reservations_and_keeping_data(tmp_pat
     try:
         db.init_db(conn)
         db.init_db(conn)  # idempotente
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 4
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 5
         assert conn.execute("SELECT count(*) FROM categories").fetchone()[0] == 1
         cols = [r["name"] for r in conn.execute("PRAGMA table_info(collector_reservations)")]
         assert cols == ["id", "origin", "reserved_at", "expires_at", "consumed_at"]
+    finally:
+        conn.close()
+
+
+def test_v4_database_migrates_to_v5_keeping_the_failures_after_a_resume(tmp_path):
+    """INF-03 (SEC-017): banco v4 em `verificando`: as falhas a partir da retomada continuam contando."""
+    path = tmp_path / "v4.db"
+    conn = sqlite3.connect(path)
+    conn.executescript(db.SCHEMA_PATH.read_text("utf-8").split(db.V5_MARKER)[0] + "PRAGMA user_version = 4;")
+    for at, status in (("11:00", "inaccessible"), ("12:00", "error"), ("12:01", "error")):
+        conn.execute(
+            "INSERT INTO runs (started_at, finished_at, collector, is_demo, trigger, source_status) "
+            "VALUES (?, ?, 'navegador', 0, 'scheduled', ?)",
+            (f"2026-10-29T{at}:00Z", f"2026-10-29T{at}:00Z", status))
+    conn.execute(
+        "INSERT INTO collector_state VALUES (1, 'verificando', 'retomada', '2026-10-29T12:00:00Z', "
+        "'2026-10-29T12:00:00Z')")
+    conn.execute(
+        "INSERT INTO collector_reservations VALUES ('r1', 'http://127.0.0.1:8777', "
+        "'2026-10-29T12:00:00Z', '2026-10-29T12:02:00Z', NULL)")
+    conn.commit()
+    conn.close()
+    conn = db.connect(path)
+    try:
+        db.init_db(conn)
+        db.init_db(conn)  # idempotente
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 5
+        state = db.get_collector_state(conn)
+        assert (state.estado, state.motivo, state.apos_execucao) == ("verificando", "retomada", 1)
+        assert conn.execute("SELECT id FROM collector_reservations").fetchall()[0][0] == "r1"
+        assert db.recent_statuses(conn, 3, state.apos_execucao) == ["error", "error"]
     finally:
         conn.close()

@@ -126,7 +126,7 @@ def test_migration_of_a_demo_v1_database_is_lossless(project_config, tmp_path):
     conn = db.connect(cfg.db_path)
     try:
         db.init_db(conn)
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 4
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 5
         names = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         assert {"run_sources", "run_services"} <= names
         assert _dump(conn) == before

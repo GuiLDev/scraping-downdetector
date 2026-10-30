@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import dataclasses
 import re
+import sqlite3
 import threading
 from datetime import timedelta
+from urllib.parse import quote
 
 import pytest
 import waitress
@@ -31,18 +33,19 @@ def env(tmp_path, monkeypatch):
 
 @pytest.fixture
 def ext_env(tmp_path, monkeypatch):
-    """Ambiente com origem EXTERNA autorizada (config montada direto: o TOML exige autorizacao
-    registrada em docs, que hoje nao existe)."""
+    """Ambiente com origem EXTERNA autorizada, unica na lista (config montada direto: o TOML exige
+    autorizacao registrada em docs, que hoje nao existe)."""
     e = Env(tmp_path, monkeypatch)
-    e.cfg = dataclasses.replace(e.cfg, browser_origins=("http://127.0.0.1:8777", "https://exemplo.test"),
+    e.cfg = dataclasses.replace(e.cfg, browser_origins=("https://exemplo.test",),
                                 browser_authorization_ref="AUT-TESTE")
     e.app = create_app(e.cfg, clock=lambda: e.now, coleta_api=True, coleta_token=TOKEN)
     e.client = e.app.test_client()
     return e
 
 
-def state(e):
-    return e.client.get(ESTADO, headers=HEADERS).get_json()
+def state(e, url=None):
+    path = ESTADO if url is None else "/api/coleta/estado?alvo=" + quote(url, safe="")
+    return e.client.get(path, headers=HEADERS).get_json()
 
 
 # --- SEC-001: checagem de pausa, gravacao da execucao e do estado numa unica secao critica ----------
@@ -116,24 +119,54 @@ def test_state_endpoint_refuses_unauthorized_alvo_with_403(env):
 # --- SEC-003: trava de politica para origem NAO local --------------------------------------------------------
 
 
-def test_loopback_origin_with_zero_interval_allows_back_to_back_readings(ext_env):
-    assert ext_env.post(page_html()).status_code == 200
-    assert ext_env.post(page_html()).status_code == 200
+def test_loopback_origin_with_zero_interval_allows_back_to_back_readings(env):
+    assert env.post(page_html()).status_code == 200
+    assert env.post(page_html()).status_code == 200
 
 
 def test_challenge_on_external_origin_suspends_and_resume_does_not_reactivate(ext_env):
     e = ext_env
     assert e.post(blocked_html(), url=EXTERNAL).get_json()["estado"] == "pausado"
-    s = state(e)
+    s = state(e, EXTERNAL)
     assert s["estado"] == "pausado" and s["motivo"] == "suspenso_por_desafio"
     html = e.home()
     assert SUSPENDED_NOTICE in html
     assert "Retomar verificação" not in html and "resume-form" not in html and "resolva" not in html.lower()
     csrf = e.app.template_context_processors[None][-1]()["csrf_token"]
     assert e.client.post("/coleta/retomar", data={"csrf": csrf}).status_code == 409
-    assert state(e)["estado"] == "pausado"
+    assert state(e, EXTERNAL)["estado"] == "pausado"
     e.now = NOW + 120 * MIN
     assert e.post(page_html(), url=EXTERNAL).status_code == 409
+
+
+def test_external_config_refuses_resume_even_for_a_leftover_local_pause(ext_env):
+    """INF-01: banco reconfigurado de loopback para externa com a pausa de loopback ainda gravada."""
+    _leftover_state_is_an_external_suspension(ext_env, "pausado", browser_service.BLOCK_REASON)
+
+
+@pytest.mark.parametrize("motivo", [browser_service.RESUME_REASON, browser_service.SUSPENDED_REASON])
+def test_external_config_treats_a_leftover_local_verification_as_a_suspension(ext_env, motivo):
+    """INF-01 (SEC-016/SEC-022): `verificando` gravado nunca vale para a origem externa."""
+    _leftover_state_is_an_external_suspension(ext_env, "verificando", motivo)
+
+
+def _leftover_state_is_an_external_suspension(e, estado, motivo):
+    conn = db.open_db(e.cfg)
+    try:
+        db.set_collector_state(conn, estado, motivo, NOW)
+    finally:
+        conn.close()
+    html = e.home()
+    assert SUSPENDED_NOTICE in html and "Verificação solicitada" not in html
+    assert "Retomar verificação" not in html and "resume-form" not in html and "resolva" not in html.lower()
+    csrf = e.app.template_context_processors[None][-1]()["csrf_token"]
+    assert e.client.post("/coleta/retomar", data={"csrf": csrf}).status_code == 409
+    s = state(e, EXTERNAL)
+    assert (s["estado"], s["pode_reservar"]) == ("pausado", False)
+    assert e.reserve(EXTERNAL).status_code == 409
+    resp = e.client.post("/api/coleta", json={"url": EXTERNAL, "html": page_html(), "modo": "verificacao"},
+                         headers=HEADERS)
+    assert resp.status_code == 409 and e.statuses() == []
 
 
 def test_local_challenge_keeps_the_manual_resume_flow(env):
@@ -154,18 +187,18 @@ def test_consecutive_failures_on_external_origin_suspend_and_refuse_resume(ext_e
     for k in range(3):
         e.now = NOW + k * 60 * MIN  # origem externa: 1 reserva por hora
         assert e.post("<html><body></body></html>", url=EXTERNAL).status_code == 200
-    s = state(e)
+    s = state(e, EXTERNAL)
     assert s["estado"] == "pausado" and s["motivo"] == "falhas_consecutivas_externa"
     html = e.home()
     assert EXTERNAL_FAILURES_NOTICE in html
     assert "Retomar verificação" not in html and "resume-form" not in html
     csrf = e.app.template_context_processors[None][-1]()["csrf_token"]
     assert e.client.post("/coleta/retomar", data={"csrf": csrf}).status_code == 409
-    assert state(e)["estado"] == "pausado"
+    assert state(e, EXTERNAL)["estado"] == "pausado"
 
 
-def test_consecutive_failures_on_loopback_keep_the_manual_resume(ext_env):
-    e = ext_env
+def test_consecutive_failures_on_loopback_keep_the_manual_resume(env):
+    e = env
     for _ in range(3):
         e.post("<html><body></body></html>")
     assert state(e)["motivo"] == "falhas_consecutivas"
@@ -193,6 +226,24 @@ def test_autorizacao_ref_must_match_an_id_in_the_registered_authorizations(write
         _toml_with_ref(write_config, bad)
         with pytest.raises(ConfigError, match="Autorizações registradas"):
             load_config()
+
+
+@pytest.mark.parametrize("listed", [
+    '"http://127.0.0.1:8777", "https://exemplo.test"',
+    '"https://exemplo.test", "https://outro.test"',
+])
+def test_external_origin_never_shares_the_collector_state_with_another_origin(
+        write_config, tmp_path, monkeypatch, listed):
+    """INF-01 (restricao temporaria): o estado da coleta e unico por banco."""
+    from conftest import TOML
+
+    doc = tmp_path / "doc.md"
+    doc.write_text("# Doc\n" + DOC_SECTION, "utf-8")
+    monkeypatch.setattr(config, "AUTHORIZATIONS_DOC", doc)
+    write_config(TOML.format(collector="demo") + (
+        f'\n[coleta_navegador]\norigens_autorizadas = [{listed}]\nautorizacao_ref = "AUT-TESTE-1"\n'))
+    with pytest.raises(ConfigError, match="única origem"):
+        load_config()
 
 
 def test_with_the_real_docs_no_external_origin_is_accepted(write_config):
@@ -314,6 +365,121 @@ def test_after_resume_one_failure_does_not_pause_again_immediately(env):
     assert env.post(INCOMPLETE).get_json()["estado"] == "verificando"
     env.now = NOW + 7 * MIN
     assert env.post(page_html()).get_json()["estado"] == "ativo"
+
+
+def test_failure_count_after_resume_is_exact_even_when_everything_happens_in_the_same_second(env):
+    """INF-03: as falhas de antes da retomada nao contam e as de depois contam, no mesmo segundo."""
+    for _ in range(3):
+        env.post(INCOMPLETE)
+    assert state(env)["estado"] == "pausado"
+    assert env.client.post("/coleta/retomar", data={"csrf": env.csrf()}).status_code == 303
+    assert env.post(INCOMPLETE).get_json()["estado"] == "verificando"
+    assert env.post(INCOMPLETE).get_json()["estado"] == "verificando"
+    resp = env.post(INCOMPLETE).get_json()
+    assert resp["estado"] == "pausado" and state(env)["motivo"] == "falhas_consecutivas"
+
+
+def test_a_block_and_the_resume_in_the_same_second_do_not_count_as_failures_after_it(env):
+    env.post(blocked_html())
+    assert env.client.post("/coleta/retomar", data={"csrf": env.csrf()}).status_code == 303
+    assert env.post(INCOMPLETE).get_json()["estado"] == "verificando"
+    assert env.post(INCOMPLETE).get_json()["estado"] == "verificando"
+
+
+# --- SEC-018: banco v4 nunca aparece como "ativo" ----------------------------------------------------------------
+
+
+def _v4_browser_db(cfg, estado, motivo):
+    """Banco do navegador ainda na v4 (sem `apos_execucao`), como a versao anterior o deixou."""
+    path = dataclasses.replace(cfg, collector="navegador").db_path
+    path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(path)
+    try:
+        conn.executescript(db.SCHEMA_PATH.read_text("utf-8").split(db.V5_MARKER)[0] + "PRAGMA user_version = 4;")
+        conn.execute(
+            "INSERT INTO runs (started_at, finished_at, collector, is_demo, trigger, source_status) "
+            "VALUES ('2026-10-29T12:00:00Z', '2026-10-29T12:00:00Z', 'navegador', 0, 'scheduled', 'inaccessible')")
+        conn.execute("INSERT INTO collector_state VALUES (1, ?, ?, '2026-10-29T12:01:00Z', '2026-10-29T12:01:00Z')",
+                     (estado, motivo))
+        conn.commit()
+    finally:
+        conn.close()
+    return path
+
+
+@pytest.mark.parametrize("estado, motivo, shown", [
+    ("pausado", browser_service.BLOCK_REASON, "Retomar verificação</button>"),
+    ("verificando", browser_service.RESUME_REASON, "Verificação solicitada"),
+])
+def test_serve_navegador_migrates_a_v4_database_before_serving(tmp_path, monkeypatch, estado, motivo, shown):
+    cfg = make_cfg(tmp_path, monkeypatch, extra=LOCAL_SECTION)
+    path = _v4_browser_db(cfg, estado, motivo)
+    calls = {}
+    monkeypatch.setattr(waitress, "serve", lambda app, **kw: calls.update(app=app))
+    assert cli.main(["serve", "--navegador"]) == cli.EXIT_OK
+    conn = sqlite3.connect(path)
+    try:
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 5
+        assert conn.execute("SELECT estado, motivo FROM collector_state").fetchone() == (estado, motivo)
+        assert conn.execute("SELECT count(*) FROM runs").fetchone()[0] == 1
+    finally:
+        conn.close()
+    client = calls["app"].test_client()
+    token = (tmp_path / "data" / "coleta-token.txt").read_text("utf-8").strip()
+    s = client.get(ESTADO, headers={"X-BankMonitor-Token": token}).get_json()
+    assert s["estado"] == estado
+    if estado == "pausado":
+        assert s["pode_reservar"] is False
+    html = client.get("/").get_data(as_text=True)
+    assert shown in html and "ilegível" not in html
+
+
+def test_serve_navegador_without_a_database_does_not_create_one(tmp_path, monkeypatch):
+    cfg = make_cfg(tmp_path, monkeypatch, extra=LOCAL_SECTION)
+    monkeypatch.setattr(waitress, "serve", lambda app, **kw: None)
+    assert cli.main(["serve", "--navegador"]) == cli.EXIT_OK
+    assert not dataclasses.replace(cfg, collector="navegador").db_path.exists()
+
+
+def test_state_api_over_an_unmigrated_v4_database_fails_closed_without_writing(env):
+    path = _v4_browser_db(env.cfg, "pausado", browser_service.BLOCK_REASON)
+    before = path.read_bytes()
+    resp = env.client.get(ESTADO, headers=HEADERS)
+    assert resp.status_code == 500 and resp.get_json() == {"erro": "erro interno"}
+    html = env.home()
+    assert "ilegível" in html and not any("state-no-alert" in c for c in cards(html))
+    assert path.read_bytes() == before
+
+
+def test_availability_over_an_unmigrated_v4_database_raises_instead_of_allowing(env):
+    """SEC-020: o fail-closed de `check_availability` tambem e coberto (a API le o estado antes)."""
+    _v4_browser_db(env.cfg, "pausado", browser_service.BLOCK_REASON)
+    with pytest.raises(sqlite3.OperationalError):
+        browser_service.check_availability(env.cfg, URL, NOW)
+
+
+def test_serve_navegador_reports_a_failed_startup_migration_without_traceback(tmp_path, monkeypatch, capsys):
+    """SEC-019: outro `serve` ja migrou entre a leitura da versao e o ALTER (coluna ja existe)."""
+    cfg = make_cfg(tmp_path, monkeypatch, extra=LOCAL_SECTION)
+    path = _v4_browser_db(cfg, "pausado", browser_service.BLOCK_REASON)
+    conn = sqlite3.connect(path)
+    conn.execute("ALTER TABLE collector_state ADD COLUMN apos_execucao INTEGER NOT NULL DEFAULT 0")
+    conn.commit()
+    conn.close()
+    called = []
+    monkeypatch.setattr(waitress, "serve", lambda app, **kw: called.append(1))
+    assert cli.main(["serve", "--navegador"]) == cli.EXIT_FAIL
+    err = capsys.readouterr().err
+    assert "Erro de banco" in err and "Traceback" not in err and called == []
+
+
+def test_verification_of_an_external_url_is_refused_even_in_the_verifying_state(env):
+    """SEC-021: a trava `external` da verificacao, independente do `effective_state`."""
+    env.post(blocked_html())
+    env.client.post("/coleta/retomar", data={"csrf": env.csrf()})
+    assert state(env)["estado"] == "verificando"
+    with pytest.raises(browser_service.VerificationRefused):
+        browser_service.ingest(env.cfg, EXTERNAL, page_html(), NOW, verification=True)
 
 
 # --- SEC-011: .gitignore -----------------------------------------------------------------------------------------------------

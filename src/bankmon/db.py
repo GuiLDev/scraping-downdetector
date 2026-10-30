@@ -20,10 +20,11 @@ from bankmon.config import Config
 from bankmon.status import InstitutionInfo, RunView
 from bankmon.timeutil import from_iso, to_iso
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 V2_MARKER = "-- @v2"
 V3_MARKER = "-- @v3"
 V4_MARKER = "-- @v4"
+V5_MARKER = "-- @v5"
 COLLECTOR_STATES = ("ativo", "pausado", "verificando")
 SCHEMA_PATH = Path(__file__).with_name("schema.sql")
 
@@ -75,21 +76,26 @@ def _v3_statements() -> list[str]:
 
 
 def _v4_statements() -> list[str]:
-    return _section_statements(V4_MARKER, None)
+    return _section_statements(V4_MARKER, V5_MARKER)
+
+
+def _v5_statements() -> list[str]:
+    return _section_statements(V5_MARKER, None)
 
 
 def init_db(conn: sqlite3.Connection) -> None:
-    """Cria o schema se o banco for novo; migra v1/v2/v3 -> v4 (so DDL aditivo; a unica tabela
+    """Cria o schema se o banco for novo; migra v1..v4 -> v5 (so DDL aditivo; a unica tabela
     recriada, run_sources, tem os dados copiados) e falha se a versao for maior que a suportada."""
     version = conn.execute("PRAGMA user_version").fetchone()[0]
     if version == 0:
         conn.executescript(SCHEMA_PATH.read_text(encoding="utf-8"))
-    elif version in (1, 2, 3):
+    elif version in (1, 2, 3, 4):
         with transaction(conn):
             statements = (
                 (_v2_statements() if version == 1 else [])
                 + (_v3_statements() if version <= 2 else [])
-                + _v4_statements()
+                + (_v4_statements() if version <= 3 else [])
+                + _v5_statements()
             )
             for statement in statements:
                 conn.execute(statement)
@@ -405,42 +411,53 @@ class CollectorState:
     estado: str  # um de COLLECTOR_STATES
     motivo: str | None
     desde: datetime | None  # None so quando nunca houve mudanca (estado padrao "ativo")
+    apos_execucao: int = 0  # id da ultima execucao gravada quando o estado mudou (v5)
 
 
 def get_collector_state(conn: sqlite3.Connection) -> CollectorState:
     """Estado atual; sem linha gravada = `ativo`. Funciona em conexao somente leitura."""
-    row = conn.execute("SELECT estado, motivo, desde FROM collector_state WHERE id = 1").fetchone()
+    row = conn.execute(
+        "SELECT estado, motivo, desde, apos_execucao FROM collector_state WHERE id = 1"
+    ).fetchone()
     if row is None:
         return CollectorState("ativo", None, None)
     if row["estado"] not in COLLECTOR_STATES:
         raise ValueError("estado da coleta desconhecido")
-    return CollectorState(row["estado"], row["motivo"], from_iso(row["desde"]))
+    return CollectorState(row["estado"], row["motivo"], from_iso(row["desde"]), row["apos_execucao"])
 
 
 def set_collector_state(
     conn: sqlite3.Connection, estado: str, motivo: str | None, now: datetime
 ) -> None:
-    """Grava o estado; `desde` so muda quando o estado muda (o motivo sempre e atualizado)."""
+    """Grava o estado; `desde` e `apos_execucao` so mudam quando o estado muda (o motivo sempre e
+    atualizado)."""
     if estado not in COLLECTOR_STATES:
         raise ValueError(f"estado da coleta inválido: {estado!r}")
     with transaction(conn):
-        current = conn.execute("SELECT estado, desde FROM collector_state WHERE id = 1").fetchone()
-        since = current["desde"] if current is not None and current["estado"] == estado else to_iso(now)
+        current = conn.execute(
+            "SELECT estado, desde, apos_execucao FROM collector_state WHERE id = 1"
+        ).fetchone()
+        if current is not None and current["estado"] == estado:
+            since, after = current["desde"], current["apos_execucao"]
+        else:
+            since = to_iso(now)
+            after = conn.execute("SELECT COALESCE(MAX(id), 0) FROM runs").fetchone()[0]
         conn.execute(
-            "INSERT INTO collector_state (id, estado, motivo, desde, atualizado_em) "
-            "VALUES (1, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET estado = excluded.estado, "
-            "motivo = excluded.motivo, desde = excluded.desde, atualizado_em = excluded.atualizado_em",
-            (estado, motivo, since, to_iso(now)),
+            "INSERT INTO collector_state (id, estado, motivo, desde, atualizado_em, apos_execucao) "
+            "VALUES (1, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET estado = excluded.estado, "
+            "motivo = excluded.motivo, desde = excluded.desde, atualizado_em = excluded.atualizado_em, "
+            "apos_execucao = excluded.apos_execucao",
+            (estado, motivo, since, to_iso(now), after),
         )
 
 
-def recent_statuses(conn: sqlite3.Connection, limit: int, since: datetime | None = None) -> list[str]:
+def recent_statuses(conn: sqlite3.Connection, limit: int, after_run_id: int | None = None) -> list[str]:
     """`source_status` das ultimas `limit` execucoes (mais recente primeiro), opcionalmente so as
-    com finished_at >= `since`."""
+    de id maior que `after_run_id` (exato mesmo com horarios iguais)."""
     sql, params = "SELECT source_status FROM runs", []
-    if since is not None:
-        sql += " WHERE finished_at >= ?"
-        params.append(to_iso(since))
+    if after_run_id is not None:
+        sql += " WHERE id > ?"
+        params.append(after_run_id)
     rows = conn.execute(sql + " ORDER BY id DESC LIMIT ?", (*params, limit)).fetchall()
     return [r["source_status"] for r in rows]
 
@@ -471,6 +488,15 @@ def insert_reservation(
     conn.execute(
         "INSERT INTO collector_reservations (id, origin, reserved_at, expires_at) VALUES (?, ?, ?, ?)",
         (reservation_id, origin, to_iso(reserved_at), to_iso(expires_at)),
+    )
+
+
+def prune_reservations(conn: sqlite3.Connection, origin: str, keep_id: str, now: datetime) -> None:
+    """Apaga as reservas consumidas ou expiradas da origem, exceto `keep_id` (a mais recente)."""
+    conn.execute(
+        "DELETE FROM collector_reservations WHERE origin = ? AND id <> ? "
+        "AND (consumed_at IS NOT NULL OR expires_at <= ?)",
+        (origin, keep_id, to_iso(now)),
     )
 
 

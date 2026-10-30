@@ -252,6 +252,12 @@ def cmd_serve(cfg: Config, args: argparse.Namespace) -> int:
         if not cfg.browser_origins:
             raise ConfigError(NO_ORIGINS_MESSAGE)
         cfg = browser_config(cfg)
+        if cfg.db_path.exists():  # SEC-018: migra (aditivo) antes de servir; leitura nunca ve schema antigo
+            try:
+                db.open_db(cfg).close()
+            except sqlite3.Error as exc:  # SEC-019: ex.: outro `serve` migrou ao mesmo tempo (nada se perde)
+                print(f"Erro de banco: {safe_text(str(exc))}", file=sys.stderr)
+                return EXIT_FAIL
         api_kwargs = {"coleta_api": True, "coleta_token": extension.load_or_create_token(cfg.data_dir)}
         print(BROWSER_WARNING)
     if getattr(args, "offline", False):

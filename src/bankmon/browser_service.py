@@ -14,6 +14,7 @@ pelo clique humano em "Retomar verificacao").
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 import math
 import secrets
@@ -98,15 +99,29 @@ def min_interval(cfg: Config, url: str) -> timedelta:
     return EXTERNAL_MIN_INTERVAL
 
 
+def effective_collector_state(cfg: Config, state: db.CollectorState) -> db.CollectorState:
+    """INF-01: com origem externa configurada nao ha retomada. Pausa ou verificacao que sobrou de
+    uma configuracao loopback anterior no mesmo banco vale como suspensao de origem externa."""
+    if not cfg.browser_external or state.estado == "ativo":
+        return state
+    if state.estado == "pausado" and state.motivo in NO_RESUME_REASONS:
+        return state
+    motivo = EXTERNAL_FAILURES_REASON if state.motivo == FAILURES_REASON else SUSPENDED_REASON
+    return dataclasses.replace(state, estado="pausado", motivo=motivo)
+
+
+def _state(cfg: Config, conn: sqlite3.Connection) -> db.CollectorState:
+    return effective_collector_state(cfg, db.get_collector_state(conn))
+
+
 def read_state(cfg: Config) -> db.CollectorState:
-    """Estado sem criar o banco (banco ausente ou sem a tabela = ativo)."""
+    """Estado sem criar o banco (banco ausente = ativo). Banco ilegivel ou com schema antigo levanta
+    `sqlite3.Error` (SEC-018: nunca vira "ativo"; `serve --navegador` migra antes de servir)."""
     if not cfg.db_path.exists():
         return db.CollectorState("ativo", None, None)
     conn = db.open_readonly(cfg.db_path)
     try:
-        return db.get_collector_state(conn)
-    except sqlite3.OperationalError:
-        return db.CollectorState("ativo", None, None)
+        return _state(cfg, conn)
     finally:
         conn.close()
 
@@ -115,13 +130,13 @@ def request_resume(cfg: Config, now: datetime) -> None:
     """Botao "Retomar verificacao": so autoriza a extensao a checar a pagina de novo.
 
     Nada e contornado aqui; se a pagina continuar bloqueada, a proxima leitura volta a pausar.
-    Sob o lock (levanta `runner.LockBusy`); `ResumeRefused` se a coleta foi suspensa
-    em origem externa.
+    Sob o lock (levanta `runner.LockBusy`); `ResumeRefused` se a coleta foi suspensa em origem
+    externa (inclui, via `effective_collector_state`, o que sobrou de uma configuracao loopback anterior).
     """
     with runner.file_lock(cfg.lock_path):
         conn = db.open_db(cfg)
         try:
-            current = db.get_collector_state(conn)
+            current = _state(cfg, conn)
             if current.estado != "pausado":
                 return
             if current.motivo in NO_RESUME_REASONS:
@@ -137,17 +152,16 @@ def _next_allowed(conn: sqlite3.Connection, cfg: Config, url: str, origin: str) 
 
 
 def check_availability(cfg: Config, url: str, now: datetime) -> Availability:
-    """Consulta SOMENTE LEITURA (nunca cria banco nem grava): pode reservar agora?"""
+    """Consulta SOMENTE LEITURA (nunca cria banco nem grava): pode reservar agora? Banco ilegivel ou
+    com schema antigo levanta `sqlite3.Error` (SEC-018: nunca vira "pode reservar")."""
     if not cfg.db_path.exists():
         return Availability(True, None)
     origin = origins.origin_of(url)
     conn = db.open_readonly(cfg.db_path)
     try:
-        if db.get_collector_state(conn).estado == "pausado" or db.has_open_reservation(conn, origin, now):
+        if _state(cfg, conn).estado == "pausado" or db.has_open_reservation(conn, origin, now):
             return Availability(False, None)
         allowed = _next_allowed(conn, cfg, url, origin)
-    except sqlite3.OperationalError:  # banco ainda sem as tabelas (versao anterior)
-        return Availability(True, None)
     finally:
         conn.close()
     if allowed is not None and now < allowed:
@@ -166,7 +180,7 @@ def reserve(cfg: Config, url: str, now: datetime) -> Reservation:
         conn = db.open_db(cfg)
         try:
             with db.transaction(conn):
-                if db.get_collector_state(conn).estado == "pausado":
+                if _state(cfg, conn).estado == "pausado":
                     raise Paused("coleta pausada")
                 if db.has_open_reservation(conn, origin, now):
                     raise ReservationActive("já existe uma reserva aberta para a origem")
@@ -176,6 +190,8 @@ def reserve(cfg: Config, url: str, now: datetime) -> Reservation:
                     raise TooFrequent("intervalo mínimo entre leituras não cumprido", max(wait, 1))
                 reservation = Reservation(secrets.token_urlsafe(24), now + RESERVATION_TTL)
                 db.insert_reservation(conn, reservation.reserva_id, origin, now, reservation.expira_em)
+                # INF-02: o intervalo conta da reserva mais recente; as fechadas nao servem mais
+                db.prune_reservations(conn, origin, reservation.reserva_id, now)
         finally:
             conn.close()
     return reservation
@@ -189,9 +205,9 @@ def _next_state(
         return "ativo", None
     if status == "inaccessible":  # pagina de desafio
         return "pausado", SUSPENDED_REASON if external else BLOCK_REASON
-    # error: pausa so depois de N leituras seguidas sem sucesso (contadas desde a retomada)
-    since = previous.desde if previous.estado == "verificando" else None
-    recent = db.recent_statuses(conn, FAILURES_TO_PAUSE, since)
+    # error: pausa so depois de N leituras seguidas sem sucesso (contadas desde a retomada, pelo id)
+    after = previous.apos_execucao if previous.estado == "verificando" else None
+    recent = db.recent_statuses(conn, FAILURES_TO_PAUSE, after)
     if len(recent) == FAILURES_TO_PAUSE and all(r != "ok" for r in recent):
         return "pausado", EXTERNAL_FAILURES_REASON if external else FAILURES_REASON
     return None
@@ -219,7 +235,7 @@ def ingest(
     with runner.file_lock(cfg.lock_path):
         conn = db.open_db(cfg)
         try:
-            previous = db.get_collector_state(conn)
+            previous = _state(cfg, conn)
             if previous.estado == "pausado":
                 raise Paused("coleta pausada")
             on_record = None
@@ -240,7 +256,7 @@ def ingest(
             change = _next_state(conn, status, external, previous)
             if change is not None:
                 db.set_collector_state(conn, change[0], change[1], now)
-            state = db.get_collector_state(conn)
+            state = _state(cfg, conn)
         finally:
             conn.close()
     log.info("Coleta do navegador: execução %d, status=%s, estado=%s", outcome.run_id, status, state.estado)

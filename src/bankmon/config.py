@@ -239,6 +239,13 @@ def _parse_browser_section(raw) -> tuple[tuple[str, ...], str, int]:
             f"[coleta_navegador] autorizacao_ref {ref!r} não consta em \"{AUTHORIZATIONS_HEADING}\" "
             f"de {AUTHORIZATIONS_DOC.name}: origem externa recusada"
         )
+    # INF-01 (restricao temporaria): o estado da coleta e unico por banco, entao uma origem externa
+    # nao divide a lista com nenhuma outra (nem loopback, nem outra externa).
+    if external and len(listed) > 1:
+        raise ConfigError(
+            "[coleta_navegador] origem externa deve ser a única origem em origens_autorizadas "
+            "(o estado da coleta é único por banco)"
+        )
     return tuple(o.strip().lower() for o in listed), ref, interval
 
 
