@@ -7,9 +7,15 @@ Reserva (SEC-014): a extensao reserva a vaga (`reserve`) ANTES de recarregar a a
 minimo vem das reservas gravadas no banco (nada em memoria) e a reserva e consumida na mesma
 transacao da execucao.
 
+Estado POR ORIGEM (schema v6, `collector_origin_state`): a pausa de uma origem nao afeta as outras.
+A linha global antiga de `collector_state` esta congelada e so vale como fallback de leitura para a
+origem sem linha propria. O contador `falhas_seguidas` da origem e gravado NA MESMA TRANSACAO da
+execucao (`on_record` do runner), junto com o consumo da reserva: nao ha janela entre gravar a
+execucao e gravar o estado.
+
 Secao critica: a checagem de "pausado", a gravacao da execucao e a do estado acontecem SOB O MESMO
 LOCK do runner. Assim uma leitura ok que chegou antes de uma pausa nunca a desfaz (a pausa so sai
-pelo clique humano em "Retomar verificacao").
+pelo clique humano em "Retomar verificacao", e so em origem loopback).
 """
 
 from __future__ import annotations
@@ -24,17 +30,19 @@ from datetime import datetime, timedelta
 from typing import Callable
 
 from bankmon import db, origins, runner
+from bankmon.collectors.base import CollectionResult
 from bankmon.collectors.browser_html import BrowserHtmlCollector
 from bankmon.config import Config
 
 log = logging.getLogger("bankmon.browser")
 
-# Motivos gravados em collector_state.motivo (codigos estaveis; a dashboard escolhe o aviso por eles).
+# Motivos gravados em collector_origin_state.motivo (codigos estaveis; a dashboard escolhe o aviso por eles).
 BLOCK_REASON = "bloqueio_detectado"
 SUSPENDED_REASON = "suspenso_por_desafio"  # desafio em origem EXTERNA: sem retomada pela dashboard
 FAILURES_REASON = "falhas_consecutivas"
 EXTERNAL_FAILURES_REASON = "falhas_consecutivas_externa"  # idem, em origem EXTERNA: sem retomada
-# Pausas de origem externa: so saem por reconfiguracao/nova autorizacao (nunca pelo botao).
+# Pausas de origem externa: nunca saem pelo botao nem trocando a origem; so com um banco novo,
+# depois da revisao da autorizacao (SEC-024).
 NO_RESUME_REASONS = (SUSPENDED_REASON, EXTERNAL_FAILURES_REASON)
 RESUME_REASON = "retomada pelo usuário; aguardando a próxima leitura da aba"
 
@@ -67,7 +75,7 @@ class VerificationRefused(Exception):
 
 
 class ResumeRefused(Exception):
-    """A coleta foi pausada em origem externa (desafio ou falhas): so reconfiguracao/nova autorizacao a reativa."""
+    """A coleta foi pausada em origem externa (desafio ou falhas): so um banco novo a reativa."""
 
 
 @dataclass(frozen=True)
@@ -99,10 +107,10 @@ def min_interval(cfg: Config, url: str) -> timedelta:
     return EXTERNAL_MIN_INTERVAL
 
 
-def effective_collector_state(cfg: Config, state: db.CollectorState) -> db.CollectorState:
-    """INF-01: com origem externa configurada nao ha retomada. Pausa ou verificacao que sobrou de
-    uma configuracao loopback anterior no mesmo banco vale como suspensao de origem externa."""
-    if not cfg.browser_external or state.estado == "ativo":
+def effective_collector_state(origin: str, state: db.CollectorState) -> db.CollectorState:
+    """INF-01: origem externa nao tem retomada. Pausa ou verificacao que sobrou de uma configuracao
+    loopback anterior (linha legada) vale como suspensao de origem externa. Decide pela origem."""
+    if origins.is_loopback_url(origin) or state.estado == "ativo":
         return state
     if state.estado == "pausado" and state.motivo in NO_RESUME_REASONS:
         return state
@@ -110,38 +118,69 @@ def effective_collector_state(cfg: Config, state: db.CollectorState) -> db.Colle
     return dataclasses.replace(state, estado="pausado", motivo=motivo)
 
 
-def _state(cfg: Config, conn: sqlite3.Connection) -> db.CollectorState:
-    return effective_collector_state(cfg, db.get_collector_state(conn))
+def configured_origins(cfg: Config) -> tuple[str, ...]:
+    """Origens da lista autorizada em forma canonica (esquema://host[:porta]), sem repeticao."""
+    return tuple(dict.fromkeys(origins.origin_of(p) for p in cfg.browser_origins))
 
 
-def read_state(cfg: Config) -> db.CollectorState:
-    """Estado sem criar o banco (banco ausente = ativo). Banco ilegivel ou com schema antigo levanta
-    `sqlite3.Error` (SEC-018: nunca vira "ativo"; `serve --navegador` migra antes de servir)."""
+def can_resume(origin: str, state: db.CollectorState) -> bool:
+    """O botao "Retomar verificacao" existe so para origem loopback pausada por motivo retomavel."""
+    return (
+        state.estado == "pausado"
+        and state.motivo not in NO_RESUME_REASONS
+        and origins.is_loopback_url(origin)
+    )
+
+
+def origin_state(origin: str, conn: sqlite3.Connection) -> db.CollectorState:
+    """Estado efetivo da origem (unico ponto de leitura: servico e dashboard).
+
+    SEC-024: a suspensao de origem EXTERNA (desafio ou falhas) vale para QUALQUER outra origem
+    externa do mesmo banco; trocar o nome da origem externa na config nao a reativa. So
+    origens externas recebem esses motivos, entao as linhas v6 nunca afetam a origem loopback
+    (a excecao e a linha legada anterior a v6: suspensa, ela vale para a loopback sem linha propria).
+    """
+    state = effective_collector_state(origin, db.get_origin_state(conn, origin))
+    if origins.is_loopback_url(origin) or (state.estado == "pausado" and state.motivo in NO_RESUME_REASONS):
+        return state
+    suspension = db.external_suspension(conn, NO_RESUME_REASONS)
+    if suspension is None:
+        return state
+    return db.CollectorState("pausado", suspension[0], suspension[1], state.falhas_seguidas)
+
+
+def read_state(cfg: Config, url: str) -> db.CollectorState:
+    """Estado da origem de `url` sem criar o banco (banco ausente = ativo). Banco ilegivel ou com
+    schema antigo levanta `sqlite3.Error` (SEC-018: nunca vira "ativo"; `serve --navegador` migra
+    antes de servir)."""
     if not cfg.db_path.exists():
         return db.CollectorState("ativo", None, None)
+    origin = origins.origin_of(url)
     conn = db.open_readonly(cfg.db_path)
     try:
-        return _state(cfg, conn)
+        return origin_state(origin, conn)
     finally:
         conn.close()
 
 
-def request_resume(cfg: Config, now: datetime) -> None:
-    """Botao "Retomar verificacao": so autoriza a extensao a checar a pagina de novo.
+def request_resume(cfg: Config, origin: str, now: datetime) -> None:
+    """Botao "Retomar verificacao" da origem: so autoriza a extensao a checar a pagina de novo.
 
     Nada e contornado aqui; se a pagina continuar bloqueada, a proxima leitura volta a pausar.
-    Sob o lock (levanta `runner.LockBusy`); `ResumeRefused` se a coleta foi suspensa em origem
-    externa (inclui, via `effective_collector_state`, o que sobrou de uma configuracao loopback anterior).
+    `ResumeRefused` (sem tocar no banco) se a origem nao for loopback; sob o lock (levanta
+    `runner.LockBusy`), tambem se a pausa for de origem externa herdada (`NO_RESUME_REASONS`).
     """
+    if not origins.is_loopback_url(origin):
+        raise ResumeRefused("coleta suspensa em origem externa")
     with runner.file_lock(cfg.lock_path):
         conn = db.open_db(cfg)
         try:
-            current = _state(cfg, conn)
+            current = origin_state(origin, conn)
             if current.estado != "pausado":
                 return
             if current.motivo in NO_RESUME_REASONS:
                 raise ResumeRefused("coleta suspensa em origem externa")
-            db.set_collector_state(conn, "verificando", RESUME_REASON, now)
+            db.set_origin_state(conn, origin, "verificando", RESUME_REASON, now)
         finally:
             conn.close()
 
@@ -159,7 +198,7 @@ def check_availability(cfg: Config, url: str, now: datetime) -> Availability:
     origin = origins.origin_of(url)
     conn = db.open_readonly(cfg.db_path)
     try:
-        if _state(cfg, conn).estado == "pausado" or db.has_open_reservation(conn, origin, now):
+        if origin_state(origin, conn).estado == "pausado" or db.has_open_reservation(conn, origin, now):
             return Availability(False, None)
         allowed = _next_allowed(conn, cfg, url, origin)
     finally:
@@ -180,7 +219,7 @@ def reserve(cfg: Config, url: str, now: datetime) -> Reservation:
         conn = db.open_db(cfg)
         try:
             with db.transaction(conn):
-                if _state(cfg, conn).estado == "pausado":
+                if origin_state(origin, conn).estado == "pausado":
                     raise Paused("coleta pausada")
                 if db.has_open_reservation(conn, origin, now):
                     raise ReservationActive("já existe uma reserva aberta para a origem")
@@ -198,19 +237,21 @@ def reserve(cfg: Config, url: str, now: datetime) -> Reservation:
 
 
 def _next_state(
-    conn: sqlite3.Connection, status: str, external: bool, previous: db.CollectorState
-) -> tuple[str, str | None] | None:
-    """Estado seguinte a uma execucao, ou None para manter o atual."""
+    status: str, external: bool, previous: db.CollectorState
+) -> tuple[str, str | None, int]:
+    """Funcao pura: `(estado, motivo, falhas_seguidas)` seguintes a uma execucao da origem.
+
+    Pausa por falhas ao chegar a `FAILURES_TO_PAUSE` leituras seguidas sem sucesso (contador por
+    origem: exato no mesmo segundo e depois de reinicio; zera num ok e na retomada).
+    """
     if status == "ok":
-        return "ativo", None
+        return "ativo", None, 0
+    failures = previous.falhas_seguidas + 1
     if status == "inaccessible":  # pagina de desafio
-        return "pausado", SUSPENDED_REASON if external else BLOCK_REASON
-    # error: pausa so depois de N leituras seguidas sem sucesso (contadas desde a retomada, pelo id)
-    after = previous.apos_execucao if previous.estado == "verificando" else None
-    recent = db.recent_statuses(conn, FAILURES_TO_PAUSE, after)
-    if len(recent) == FAILURES_TO_PAUSE and all(r != "ok" for r in recent):
-        return "pausado", EXTERNAL_FAILURES_REASON if external else FAILURES_REASON
-    return None
+        return "pausado", SUSPENDED_REASON if external else BLOCK_REASON, failures
+    if failures >= FAILURES_TO_PAUSE:
+        return "pausado", EXTERNAL_FAILURES_REASON if external else FAILURES_REASON, failures
+    return previous.estado, previous.motivo, failures
 
 
 def ingest(
@@ -222,10 +263,10 @@ def ingest(
     verification: bool = False,
     collector_factory: Callable[[str, str, datetime], BrowserHtmlCollector] = BrowserHtmlCollector,
 ) -> IngestOutcome:
-    """Checa pausa e reserva, roda o coletor e atualiza o estado, tudo sob o lock do runner.
+    """Checa pausa e reserva, roda o coletor e atualiza o estado da origem, tudo sob o lock do runner.
 
     Leitura normal exige `reserva_id` valido (mesma origem, nao consumido, nao expirado), consumido
-    NA MESMA transacao que grava a execucao. `verification=True` (so no estado `verificando` e so em
+    NA MESMA transacao que grava a execucao e o estado da origem. `verification=True` (so no estado `verificando` e so em
     origem loopback) le o DOM atual sem reserva. Levanta `runner.LockBusy`, `Paused` (sem gravar
     nada), `TooFrequent` (sem reserva valida) ou `VerificationRefused`.
     """
@@ -235,28 +276,25 @@ def ingest(
     with runner.file_lock(cfg.lock_path):
         conn = db.open_db(cfg)
         try:
-            previous = _state(cfg, conn)
+            previous = origin_state(origin, conn)
             if previous.estado == "pausado":
                 raise Paused("coleta pausada")
-            on_record = None
             if verification:
                 if previous.estado != "verificando" or external:
                     raise VerificationRefused("verificação indisponível")
-            else:
-                if not reserva_id or not db.is_reservation_valid(conn, reserva_id, origin, now):
-                    raise TooFrequent(NO_RESERVATION_MESSAGE)
+            elif not reserva_id or not db.is_reservation_valid(conn, reserva_id, origin, now):
+                raise TooFrequent(NO_RESERVATION_MESSAGE)
 
-                def on_record(c: sqlite3.Connection) -> None:
-                    if not db.consume_reservation(c, reserva_id, origin, now):
-                        raise TooFrequent(NO_RESERVATION_MESSAGE)
+            def on_record(c: sqlite3.Connection, result: CollectionResult) -> None:
+                # na transacao da execucao: reserva consumida e estado/contador da origem juntos
+                if not verification and not db.consume_reservation(c, reserva_id, origin, now):
+                    raise TooFrequent(NO_RESERVATION_MESSAGE)
+                db.write_origin_state(c, origin, *_next_state(result.source_status, external, previous), now)
 
             collector = collector_factory(html, clean, now)
             outcome = runner.collect_and_record(conn, cfg, collector, "scheduled", lambda: now, on_record)
             status = outcome.result.source_status
-            change = _next_state(conn, status, external, previous)
-            if change is not None:
-                db.set_collector_state(conn, change[0], change[1], now)
-            state = _state(cfg, conn)
+            state = origin_state(origin, conn)
         finally:
             conn.close()
     log.info("Coleta do navegador: execução %d, status=%s, estado=%s", outcome.run_id, status, state.estado)

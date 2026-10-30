@@ -130,7 +130,7 @@ def test_schema_tables_columns_and_version(conn):
     assert cols("state_transitions") == [
         "id", "institution_id", "run_id", "from_state", "to_state", "changed_at",
     ]
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == db.SCHEMA_VERSION == 5
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == db.SCHEMA_VERSION == 6
 
 
 def test_wal_and_foreign_keys_enabled(conn):

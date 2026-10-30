@@ -129,4 +129,30 @@ ALTER TABLE collector_state ADD COLUMN apos_execucao INTEGER NOT NULL DEFAULT 0;
 UPDATE collector_state SET apos_execucao =
     (SELECT COALESCE(MAX(id), 0) FROM runs WHERE finished_at < collector_state.desde);
 
-PRAGMA user_version = 5;
+-- @v6 (aditivo: um banco v5 migra executando so esta parte)
+-- Estado da coleta POR ORIGEM (a linha global de collector_state fica congelada: vale so como
+-- fallback de leitura para a origem sem linha propria). falhas_seguidas: leituras seguidas sem
+-- sucesso, gravado na mesma transacao da execucao; zera num ok e na retomada. Na migracao, o
+-- contador da linha legada e calculado pela regra exata da v5 (execucoes de id maior que a
+-- ultima ok e, em verificacao, que a fronteira apos_execucao).
+CREATE TABLE collector_origin_state (
+    origin          TEXT PRIMARY KEY,
+    estado          TEXT NOT NULL CHECK (estado IN ('ativo', 'pausado', 'verificando')),
+    motivo          TEXT,
+    desde           TEXT NOT NULL,
+    atualizado_em   TEXT NOT NULL,
+    falhas_seguidas INTEGER NOT NULL DEFAULT 0 CHECK (falhas_seguidas >= 0)
+);
+ALTER TABLE collector_state ADD COLUMN falhas_seguidas INTEGER NOT NULL DEFAULT 0;
+UPDATE collector_state SET falhas_seguidas = (SELECT COUNT(*) FROM runs WHERE id > MAX(
+    CASE WHEN collector_state.estado = 'verificando' THEN collector_state.apos_execucao ELSE 0 END,
+    (SELECT COALESCE(MAX(id), 0) FROM runs WHERE source_status = 'ok')));
+-- Sem linha legada mas com falhas seguidas gravadas: cria a linha ativa com o contador (nao zera).
+-- Subconsulta em vez de HAVING sem GROUP BY (que exige SQLite 3.39+; o Linux pode ter versao anterior).
+INSERT INTO collector_state (id, estado, motivo, desde, atualizado_em, apos_execucao, falhas_seguidas)
+    SELECT 1, 'ativo', NULL, ultima, ultima, 0, falhas FROM (
+        SELECT COUNT(*) AS falhas, MAX(finished_at) AS ultima FROM runs
+        WHERE id > (SELECT COALESCE(MAX(id), 0) FROM runs WHERE source_status = 'ok'))
+    WHERE falhas > 0 AND NOT EXISTS (SELECT 1 FROM collector_state);
+
+PRAGMA user_version = 6;

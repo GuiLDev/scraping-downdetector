@@ -61,7 +61,7 @@ def test_ingest_after_a_pause_is_refused_in_the_service_and_never_reactivates(en
     _ingest(env, blocked_html(), NOW)
     with pytest.raises(browser_service.Paused):
         _ingest(env, page_html(), NOW + MIN)
-    assert browser_service.read_state(env.cfg).estado == "pausado"
+    assert browser_service.read_state(env.cfg, URL).estado == "pausado"
     assert env.statuses() == ["inaccessible"]  # a leitura recusada nao gravou execucao
 
 
@@ -91,10 +91,10 @@ def test_a_slow_ingest_holds_the_critical_section_so_a_pause_cannot_interleave(e
         t.join(10)
     assert outcome["a"].estado == "ativo"
     _ingest(env, blocked_html(), NOW + MIN)  # agora sim, em serie
-    assert browser_service.read_state(env.cfg).estado == "pausado"
+    assert browser_service.read_state(env.cfg, URL).estado == "pausado"
     with pytest.raises(browser_service.Paused):
         _ingest(env, page_html(), NOW + 2 * MIN)
-    assert browser_service.read_state(env.cfg).estado == "pausado"
+    assert browser_service.read_state(env.cfg, URL).estado == "pausado"
 
 
 def test_resume_waits_for_the_lock_instead_of_racing(env):
@@ -153,7 +153,10 @@ def test_external_config_treats_a_leftover_local_verification_as_a_suspension(ex
 def _leftover_state_is_an_external_suspension(e, estado, motivo):
     conn = db.open_db(e.cfg)
     try:
-        db.set_collector_state(conn, estado, motivo, NOW)
+        # estado anterior a v6: a linha GLOBAL legada (nada a grava mais), por SQL direto
+        conn.execute(
+            "INSERT INTO collector_state (id, estado, motivo, desde, atualizado_em) "
+            "VALUES (1, ?, ?, '2026-10-28T15:30:00Z', '2026-10-28T15:30:00Z')", (estado, motivo))
     finally:
         conn.close()
     html = e.home()
@@ -389,37 +392,40 @@ def test_a_block_and_the_resume_in_the_same_second_do_not_count_as_failures_afte
 # --- SEC-018: banco v4 nunca aparece como "ativo" ----------------------------------------------------------------
 
 
-def _v4_browser_db(cfg, estado, motivo):
-    """Banco do navegador ainda na v4 (sem `apos_execucao`), como a versao anterior o deixou."""
+def _v4_browser_db(cfg, estado, motivo, version=4):
+    """Banco do navegador ainda na v4 ou v5 (sem o estado por origem), como a versao anterior o deixou."""
     path = dataclasses.replace(cfg, collector="navegador").db_path
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(path)
     try:
-        conn.executescript(db.SCHEMA_PATH.read_text("utf-8").split(db.V5_MARKER)[0] + "PRAGMA user_version = 4;")
+        marker = db.V5_MARKER if version == 4 else db.V6_MARKER
+        conn.executescript(db.SCHEMA_PATH.read_text("utf-8").split(marker)[0] + f"PRAGMA user_version = {version};")
         conn.execute(
             "INSERT INTO runs (started_at, finished_at, collector, is_demo, trigger, source_status) "
             "VALUES ('2026-10-29T12:00:00Z', '2026-10-29T12:00:00Z', 'navegador', 0, 'scheduled', 'inaccessible')")
-        conn.execute("INSERT INTO collector_state VALUES (1, ?, ?, '2026-10-29T12:01:00Z', '2026-10-29T12:01:00Z')",
-                     (estado, motivo))
+        conn.execute("INSERT INTO collector_state (id, estado, motivo, desde, atualizado_em) "
+                     "VALUES (1, ?, ?, '2026-10-29T12:01:00Z', '2026-10-29T12:01:00Z')", (estado, motivo))
         conn.commit()
     finally:
         conn.close()
     return path
 
 
+@pytest.mark.parametrize("version", [4, 5])
 @pytest.mark.parametrize("estado, motivo, shown", [
     ("pausado", browser_service.BLOCK_REASON, "Retomar verificação</button>"),
     ("verificando", browser_service.RESUME_REASON, "Verificação solicitada"),
 ])
-def test_serve_navegador_migrates_a_v4_database_before_serving(tmp_path, monkeypatch, estado, motivo, shown):
+def test_serve_navegador_migrates_an_old_database_before_serving(
+        tmp_path, monkeypatch, estado, motivo, shown, version):
     cfg = make_cfg(tmp_path, monkeypatch, extra=LOCAL_SECTION)
-    path = _v4_browser_db(cfg, estado, motivo)
+    path = _v4_browser_db(cfg, estado, motivo, version)
     calls = {}
     monkeypatch.setattr(waitress, "serve", lambda app, **kw: calls.update(app=app))
     assert cli.main(["serve", "--navegador"]) == cli.EXIT_OK
     conn = sqlite3.connect(path)
     try:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 5
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == db.SCHEMA_VERSION
         assert conn.execute("SELECT estado, motivo FROM collector_state").fetchone() == (estado, motivo)
         assert conn.execute("SELECT count(*) FROM runs").fetchone()[0] == 1
     finally:
@@ -441,8 +447,9 @@ def test_serve_navegador_without_a_database_does_not_create_one(tmp_path, monkey
     assert not dataclasses.replace(cfg, collector="navegador").db_path.exists()
 
 
-def test_state_api_over_an_unmigrated_v4_database_fails_closed_without_writing(env):
-    path = _v4_browser_db(env.cfg, "pausado", browser_service.BLOCK_REASON)
+@pytest.mark.parametrize("version", [4, 5])
+def test_state_api_over_an_unmigrated_old_database_fails_closed_without_writing(env, version):
+    path = _v4_browser_db(env.cfg, "pausado", browser_service.BLOCK_REASON, version)
     before = path.read_bytes()
     resp = env.client.get(ESTADO, headers=HEADERS)
     assert resp.status_code == 500 and resp.get_json() == {"erro": "erro interno"}
@@ -451,9 +458,10 @@ def test_state_api_over_an_unmigrated_v4_database_fails_closed_without_writing(e
     assert path.read_bytes() == before
 
 
-def test_availability_over_an_unmigrated_v4_database_raises_instead_of_allowing(env):
+@pytest.mark.parametrize("version", [4, 5])
+def test_availability_over_an_unmigrated_old_database_raises_instead_of_allowing(env, version):
     """SEC-020: o fail-closed de `check_availability` tambem e coberto (a API le o estado antes)."""
-    _v4_browser_db(env.cfg, "pausado", browser_service.BLOCK_REASON)
+    _v4_browser_db(env.cfg, "pausado", browser_service.BLOCK_REASON, version)
     with pytest.raises(sqlite3.OperationalError):
         browser_service.check_availability(env.cfg, URL, NOW)
 
@@ -473,11 +481,15 @@ def test_serve_navegador_reports_a_failed_startup_migration_without_traceback(tm
     assert "Erro de banco" in err and "Traceback" not in err and called == []
 
 
-def test_verification_of_an_external_url_is_refused_even_in_the_verifying_state(env):
+def test_verification_of_an_external_url_is_refused_even_in_the_verifying_state(env, monkeypatch):
     """SEC-021: a trava `external` da verificacao, independente do `effective_state`."""
-    env.post(blocked_html())
-    env.client.post("/coleta/retomar", data={"csrf": env.csrf()})
-    assert state(env)["estado"] == "verificando"
+    conn = db.open_db(env.cfg)
+    try:
+        db.set_origin_state(conn, "https://exemplo.test", "verificando", browser_service.RESUME_REASON, NOW)
+    finally:
+        conn.close()
+    # identidade: sem o `effective_collector_state`, so a trava `external` do `ingest` recusa
+    monkeypatch.setattr(browser_service, "effective_collector_state", lambda origin, state: state)
     with pytest.raises(browser_service.VerificationRefused):
         browser_service.ingest(env.cfg, EXTERNAL, page_html(), NOW, verification=True)
 

@@ -288,7 +288,7 @@ def test_verification_mode_is_refused_outside_the_verifying_state(env, prepare):
 def test_verification_mode_is_refused_for_external_origin_even_when_verifying(ext):
     ext.post(page_html(), url=EXTERNAL)
     conn = db.open_db(ext.cfg)
-    db.set_collector_state(conn, "verificando", "x", NOW)
+    db.set_origin_state(conn, "https://exemplo.test", "verificando", "x", NOW)
     conn.close()
     runs = ext.statuses()
     assert verify(ext, page_html(), EXTERNAL).status_code == 409 and ext.statuses() == runs

@@ -192,7 +192,7 @@ def test_migration_v1_to_v5_preserves_data(tmp_path):
         db.init_db(conn)
         db.init_db(conn)  # idempotente
         db.init_db(fresh)
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 5
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == db.SCHEMA_VERSION
         assert conn.execute("SELECT 1 FROM sqlite_master WHERE name = 'idx_run_sources_sha256'").fetchone()
         assert [tuple(r) for r in conn.execute("SELECT run_id, institution_id, level FROM observations")] == [
             (1, "i1", "attention")]
@@ -210,7 +210,7 @@ def test_migration_v1_to_v5_preserves_data(tmp_path):
 def test_init_db_rejects_newer_schema(tmp_path):
     conn = db.connect(tmp_path / "n.db")
     try:
-        conn.execute("PRAGMA user_version = 6")
+        conn.execute(f"PRAGMA user_version = {db.SCHEMA_VERSION + 1}")
         with pytest.raises(db.DatabaseError):
             db.init_db(conn)
     finally:

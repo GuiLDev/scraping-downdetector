@@ -18,9 +18,10 @@ from bankmon.browser_service import (
     FAILURES_REASON,
     FAILURES_TO_PAUSE,
     EXTERNAL_FAILURES_REASON,
-    NO_RESUME_REASONS,
     SUSPENDED_REASON,
-    effective_collector_state,
+    can_resume,
+    configured_origins,
+    origin_state,
 )
 from bankmon.collectors import svg_geometry
 from bankmon.config import Config
@@ -123,7 +124,8 @@ class Snapshot:
     last_transitions: dict[str, db.TransitionRow] = field(default_factory=dict)
     # institution_id -> grafico ja revalidado (so da execucao `last_ok`; vazio se nao houver)
     charts: dict[str, dict] = field(default_factory=dict)
-    coleta: db.CollectorState | None = None  # so no modo navegador
+    # origem configurada -> estado efetivo da coleta (so no modo navegador; vazio nos demais)
+    coleta: dict[str, db.CollectorState] = field(default_factory=dict)
 
 
 def infos_from_config(cfg: Config) -> list[InstitutionInfo]:
@@ -217,7 +219,11 @@ def load_snapshot(cfg: Config) -> Snapshot:
             last_ok=last_ok,
             last_transitions=last_transitions,
             charts=_load_charts(conn, latest, last_ok),
-            coleta=effective_collector_state(cfg, db.get_collector_state(conn)) if cfg.is_browser else None,
+            coleta=(
+                {o: origin_state(o, conn) for o in configured_origins(cfg)}
+                if cfg.is_browser
+                else {}
+            ),
         )
 
     state, snap = read_db(cfg, reader)
@@ -328,22 +334,35 @@ def stale_reading_text(cfg: Config, card: status.Card, snap: Snapshot) -> str | 
     )
 
 
-def coleta_notice(cfg: Config, snap: Snapshot) -> Notice | None:
-    """Aviso de pausa/verificacao da coleta pelo navegador."""
-    if not cfg.is_browser or snap.coleta is None:
-        return None
-    if snap.coleta.estado == "pausado":
-        at = hm(snap.coleta.desde) if snap.coleta.desde else "--:--"
-        if snap.coleta.motivo == SUSPENDED_REASON:
+def _state_notice(state: db.CollectorState) -> Notice | None:
+    """Aviso de uma origem fora de `ativo` (None se estiver ativa)."""
+    if state.estado == "pausado":
+        at = hm(state.desde) if state.desde else "--:--"
+        if state.motivo == SUSPENDED_REASON:
             return Notice("source", SUSPENDED_NOTICE)
-        if snap.coleta.motivo == FAILURES_REASON:
+        if state.motivo == FAILURES_REASON:
             return Notice("source", FAILURES_NOTICE.format(n=FAILURES_TO_PAUSE, at=at))
-        if snap.coleta.motivo == EXTERNAL_FAILURES_REASON:
+        if state.motivo == EXTERNAL_FAILURES_REASON:
             return Notice("source", EXTERNAL_FAILURES_NOTICE.format(n=FAILURES_TO_PAUSE))
         return Notice("source", PAUSED_NOTICE.format(at=at))
-    if snap.coleta.estado == "verificando":
+    if state.estado == "verificando":
         return Notice("info", VERIFYING_NOTICE)
     return None
+
+
+def coleta_notices(cfg: Config, snap: Snapshot) -> list[Notice]:
+    """Um aviso por origem pausada ou em verificacao. Com mais de uma origem, o texto ganha o prefixo
+    "Origem X: " (com uma so, e identico ao de sempre)."""
+    if not cfg.is_browser:
+        return []
+    prefix = len(snap.coleta) > 1
+    notices = []
+    for origin, state in snap.coleta.items():
+        notice = _state_notice(state)
+        if notice is not None:
+            text = f"Origem {origin}: {notice.text}" if prefix else notice.text
+            notices.append(Notice(notice.kind, text, notice.detail))
+    return notices
 
 
 def _card_view(cfg: Config, card: status.Card, snap: Snapshot, now: datetime, demo: bool) -> dict:
@@ -403,15 +422,14 @@ def build_index(cfg: Config, args, now: datetime) -> dict:
         )
 
     notices, header = build_notices(cfg, snap, now)
-    pause = coleta_notice(cfg, snap)
-    if pause is not None:
-        notices.insert(0, pause)
+    notices[0:0] = coleta_notices(cfg, snap)
     return {
         "demo": demo,
         "offline_banner": offline_banner(cfg, snap),
         "notices": notices,
-        "coleta_paused": snap.coleta is not None and snap.coleta.estado == "pausado"
-        and snap.coleta.motivo not in NO_RESUME_REASONS,  # suspensa (externa): sem botao
+        # um botao por origem retomavel (externa suspensa nunca entra); o nome so aparece com varias
+        "resume_origins": [o for o, st in snap.coleta.items() if can_resume(o, st)],
+        "show_origin": len(snap.coleta) > 1,
         "header": header,
         "sections": sections,
         "filters": filters,

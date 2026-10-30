@@ -120,14 +120,14 @@ def _v2_db(path):
     conn.close()
 
 
-def test_v2_database_migrates_to_v5_without_losing_data(tmp_path):
+def test_v2_database_migrates_to_current_without_losing_data(tmp_path):
     path = tmp_path / "v2.db"
     _v2_db(path)
     conn = db.connect(path)
     try:
         db.init_db(conn)
         db.init_db(conn)  # idempotente
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 5
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == db.SCHEMA_VERSION
         row = conn.execute("SELECT kind, file_name, sha256, url FROM run_sources").fetchone()
         assert tuple(row) == ("html_offline", "a.html", "ab" * 32, None)
         assert conn.execute("SELECT count(*) FROM run_services").fetchone()[0] == 1
@@ -149,7 +149,7 @@ def test_v2_database_migrates_to_v5_without_losing_data(tmp_path):
         conn.close()
 
 
-def test_v1_database_migrates_to_v5(tmp_path):
+def test_v1_database_migrates_to_current(tmp_path):
     path = tmp_path / "v1.db"
     conn = sqlite3.connect(path)
     conn.executescript(db.SCHEMA_PATH.read_text("utf-8").split(db.V2_MARKER)[0] + "PRAGMA user_version = 1;")
@@ -157,26 +157,8 @@ def test_v1_database_migrates_to_v5(tmp_path):
     conn = db.connect(path)
     try:
         db.init_db(conn)
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 5
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == db.SCHEMA_VERSION
         assert conn.execute("SELECT count(*) FROM collector_state").fetchone()[0] == 0
-    finally:
-        conn.close()
-
-
-def test_collector_state_defaults_to_ativo_and_keeps_desde_while_unchanged(tmp_path):
-    conn = db.connect(tmp_path / "s.db")
-    try:
-        db.init_db(conn)
-        assert db.get_collector_state(conn).estado == "ativo"
-        db.set_collector_state(conn, "pausado", "bloqueio", AT)
-        later = AT.replace(hour=13)
-        db.set_collector_state(conn, "pausado", "bloqueio", later)
-        state = db.get_collector_state(conn)
-        assert (state.estado, state.motivo, state.desde) == ("pausado", "bloqueio", AT)
-        db.set_collector_state(conn, "ativo", None, later)
-        assert db.get_collector_state(conn).desde == later
-        with pytest.raises(ValueError):
-            db.set_collector_state(conn, "invalido", None, AT)
     finally:
         conn.close()
 
@@ -202,7 +184,7 @@ def test_runner_rejects_browser_source_url_with_query(tmp_path, monkeypatch):
     assert out.result.source_status == "error"
 
 
-def test_v3_database_migrates_to_v5_adding_reservations_and_keeping_data(tmp_path):
+def test_v3_database_migrates_to_current_adding_reservations_and_keeping_data(tmp_path):
     path = tmp_path / "v3.db"
     conn = sqlite3.connect(path)
     conn.executescript(db.SCHEMA_PATH.read_text("utf-8").split(db.V4_MARKER)[0] + "PRAGMA user_version = 3;")
@@ -213,7 +195,7 @@ def test_v3_database_migrates_to_v5_adding_reservations_and_keeping_data(tmp_pat
     try:
         db.init_db(conn)
         db.init_db(conn)  # idempotente
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 5
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == db.SCHEMA_VERSION
         assert conn.execute("SELECT count(*) FROM categories").fetchone()[0] == 1
         cols = [r["name"] for r in conn.execute("PRAGMA table_info(collector_reservations)")]
         assert cols == ["id", "origin", "reserved_at", "expires_at", "consumed_at"]
@@ -221,7 +203,7 @@ def test_v3_database_migrates_to_v5_adding_reservations_and_keeping_data(tmp_pat
         conn.close()
 
 
-def test_v4_database_migrates_to_v5_keeping_the_failures_after_a_resume(tmp_path):
+def test_v4_database_migrates_to_current_keeping_the_failures_after_a_resume(tmp_path):
     """INF-03 (SEC-017): banco v4 em `verificando`: as falhas a partir da retomada continuam contando."""
     path = tmp_path / "v4.db"
     conn = sqlite3.connect(path)
@@ -243,10 +225,156 @@ def test_v4_database_migrates_to_v5_keeping_the_failures_after_a_resume(tmp_path
     try:
         db.init_db(conn)
         db.init_db(conn)  # idempotente
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 5
-        state = db.get_collector_state(conn)
-        assert (state.estado, state.motivo, state.apos_execucao) == ("verificando", "retomada", 1)
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == db.SCHEMA_VERSION
+        state = db.get_origin_state(conn, "http://127.0.0.1:8777")  # linha legada (fallback)
+        assert (state.estado, state.motivo, state.falhas_seguidas) == ("verificando", "retomada", 2)
         assert conn.execute("SELECT id FROM collector_reservations").fetchall()[0][0] == "r1"
-        assert db.recent_statuses(conn, 3, state.apos_execucao) == ["error", "error"]
     finally:
         conn.close()
+
+
+# --- 4. schema v6: estado por origem e contador de falhas ----------------------------------------
+
+ORIGIN_A, ORIGIN_B = "http://127.0.0.1:8777", "http://127.0.0.1:8778"
+
+
+def _v5_db(path, statuses, estado, apos=0, motivo="m"):
+    """Banco v5 REAL (schema ate a v5) com execucoes no MESMO segundo e a linha global legada."""
+    conn = sqlite3.connect(path)
+    conn.executescript(db.SCHEMA_PATH.read_text("utf-8").split(db.V6_MARKER)[0] + "PRAGMA user_version = 5;")
+    for status in statuses:
+        conn.execute(
+            "INSERT INTO runs (started_at, finished_at, collector, is_demo, trigger, source_status) "
+            "VALUES ('2026-10-29T12:00:00Z', '2026-10-29T12:00:00Z', 'navegador', 0, 'scheduled', ?)",
+            (status,))
+    if estado is not None:  # None: banco v5 sem linha legada
+        conn.execute(
+            "INSERT INTO collector_state (id, estado, motivo, desde, atualizado_em, apos_execucao) "
+            "VALUES (1, ?, ?, '2026-10-29T12:00:00Z', '2026-10-29T12:00:00Z', ?)", (estado, motivo, apos))
+    conn.commit()
+    conn.close()
+
+
+def test_v5_database_migrates_to_v6_keeping_the_pause_for_every_origin(tmp_path):
+    path = tmp_path / "v5.db"
+    _v5_db(path, ["inaccessible"], "pausado", motivo="bloqueio_detectado")
+    conn = db.connect(path)
+    try:
+        db.init_db(conn)
+        db.init_db(conn)  # idempotente
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == db.SCHEMA_VERSION == 6
+        assert conn.execute("SELECT count(*) FROM collector_origin_state").fetchone()[0] == 0
+        legacy = conn.execute("SELECT estado, motivo, apos_execucao FROM collector_state").fetchone()
+        assert tuple(legacy) == ("pausado", "bloqueio_detectado", 0)  # linha legada intacta
+        for origin in (ORIGIN_A, ORIGIN_B, "https://outra.example"):
+            state = db.get_origin_state(conn, origin)
+            assert (state.estado, state.motivo) == ("pausado", "bloqueio_detectado")
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize(
+    ("statuses", "estado", "apos", "expected"),
+    [
+        # verificando, tudo no mesmo segundo: bloqueio e falha ANTES da retomada (apos = 2), 2 depois
+        (["inaccessible", "error", "error", "error"], "verificando", 2, 2),
+        (["error", "error", "ok", "error", "error"], "ativo", 0, 2),
+        (["ok", "error", "error", "ok"], "ativo", 0, 0),
+        # SEC-025: sem linha legada, as falhas seguidas gravadas nao podem ser zeradas
+        (["error", "error"], None, 0, 2),
+        (["ok", "error", "error"], None, 0, 2),
+    ],
+)
+def test_v5_migration_computes_the_legacy_failure_counter_exactly(tmp_path, statuses, estado, apos, expected):
+    path = tmp_path / "v5.db"
+    _v5_db(path, statuses, estado, apos)
+    conn = db.connect(path)
+    try:
+        db.init_db(conn)
+        state = db.get_origin_state(conn, ORIGIN_A)
+        assert state.falhas_seguidas == expected
+        if estado is None and expected:
+            from bankmon import browser_service
+
+            assert state.estado == "ativo"
+            assert browser_service._next_state("error", False, state)[0] == "pausado"  # a proxima pausa
+    finally:
+        conn.close()
+
+
+def test_v5_migration_creates_no_legacy_row_without_failures_and_fresh_db_has_none(tmp_path):
+    for name, statuses in (("ok", ["ok", "ok"]), ("vazio", [])):
+        path = tmp_path / f"{name}.db"
+        _v5_db(path, statuses, None)
+        conn = db.connect(path)
+        try:
+            db.init_db(conn)
+            assert conn.execute("SELECT count(*) FROM collector_state").fetchone()[0] == 0
+        finally:
+            conn.close()
+    conn = db.connect(tmp_path / "novo.db")
+    try:
+        db.init_db(conn)
+        assert conn.execute("SELECT count(*) FROM collector_state").fetchone()[0] == 0
+    finally:
+        conn.close()
+
+
+def test_origin_state_of_one_origin_does_not_affect_another(tmp_path):
+    conn = db.connect(tmp_path / "o.db")
+    try:
+        db.init_db(conn)
+        assert db.get_origin_state(conn, ORIGIN_A) == db.CollectorState("ativo", None, None)
+        db.set_origin_state(conn, ORIGIN_A, "pausado", "x", AT, falhas=3)
+        assert db.get_origin_state(conn, ORIGIN_A).estado == "pausado"
+        assert db.get_origin_state(conn, ORIGIN_A).falhas_seguidas == 3
+        assert db.get_origin_state(conn, ORIGIN_B).estado == "ativo"
+    finally:
+        conn.close()
+
+
+def test_origin_state_keeps_desde_while_unchanged_and_rejects_invalid_state(tmp_path):
+    conn = db.connect(tmp_path / "o.db")
+    try:
+        db.init_db(conn)
+        later = AT.replace(hour=13)
+        db.set_origin_state(conn, ORIGIN_A, "pausado", "bloqueio", AT)
+        db.set_origin_state(conn, ORIGIN_A, "pausado", "bloqueio", later)
+        assert db.get_origin_state(conn, ORIGIN_A).desde == AT
+        db.set_origin_state(conn, ORIGIN_A, "ativo", None, later)
+        assert db.get_origin_state(conn, ORIGIN_A).desde == later
+        with pytest.raises(ValueError):
+            db.set_origin_state(conn, ORIGIN_A, "invalido", None, AT)
+    finally:
+        conn.close()
+
+
+def test_own_row_wins_over_the_legacy_row_and_write_needs_a_transaction(tmp_path):
+    path = tmp_path / "v5.db"
+    _v5_db(path, ["inaccessible"], "pausado", motivo="bloqueio_detectado")
+    conn = db.connect(path)
+    try:
+        db.init_db(conn)
+        db.set_origin_state(conn, ORIGIN_A, "ativo", None, AT)
+        assert db.get_origin_state(conn, ORIGIN_A).estado == "ativo"
+        assert db.get_origin_state(conn, ORIGIN_B).estado == "pausado"  # sem linha propria: legada
+        with pytest.raises(db.DatabaseError):
+            db.write_origin_state(conn, ORIGIN_A, "pausado", "x", 0, AT)  # fora de transacao
+        assert db.get_origin_state(conn, ORIGIN_A).estado == "ativo"
+    finally:
+        conn.close()
+
+
+def test_get_origin_state_works_on_a_readonly_connection(tmp_path):
+    path = tmp_path / "ro.db"
+    conn = db.connect(path)
+    try:
+        db.init_db(conn)
+        db.set_origin_state(conn, ORIGIN_A, "pausado", "x", AT)
+    finally:
+        conn.close()
+    ro = db.open_readonly(path)
+    try:
+        assert db.get_origin_state(ro, ORIGIN_A).estado == "pausado"
+    finally:
+        ro.close()

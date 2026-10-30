@@ -3,7 +3,8 @@
 A extensao do navegador le o HTML da aba que o USUARIO ja abriu e o envia aqui. O servidor nao
 acessa a internet, nao le cookies e nao interage com desafios: se a pagina vier bloqueada, a
 coleta PAUSA e so volta a verificar quando o usuario resolver o bloqueio manualmente na aba e
-clicar em "Retomar verificacao" (que apenas autoriza a extensao a LER a pagina atual, sem recarregar).
+clicar em "Retomar verificacao" da origem (que apenas autoriza a extensao a LER a pagina atual, sem
+recarregar). O estado e por origem: `POST /coleta/retomar` recebe o campo `origem` (validado contra a lista).
 
 Fluxo da extensao: `GET /api/coleta/estado` (so consulta) -> `POST /api/coleta/reserva` (reserva a
 vaga ANTES de recarregar) -> recarga -> `POST /api/coleta` com o `reserva_id`. No estado
@@ -123,7 +124,7 @@ def register(
             return refuse(400, "parâmetro alvo obrigatório")
         if not origins.is_authorized(alvo, cfg.browser_origins):
             return refuse(403, "origem não autorizada")
-        state = browser_service.read_state(cfg)
+        state = browser_service.read_state(cfg, alvo)
         available = browser_service.check_availability(cfg, alvo, clock())
         return jsonify(
             estado=state.estado,
@@ -137,8 +138,15 @@ def register(
     def resume_collection():
         if not _same(request.form.get("csrf", ""), csrf_token):
             return error_page(403)
+        # origem exata da lista; vazia so vale com uma unica origem configurada (formulario antigo)
+        configured = browser_service.configured_origins(cfg)
+        origem = request.form.get("origem", "")
+        if not origem and len(configured) == 1:
+            origem = configured[0]
+        if origem not in configured:
+            return error_page(403)
         try:
-            browser_service.request_resume(cfg, clock())
+            browser_service.request_resume(cfg, origem, clock())
         except browser_service.ResumeRefused:
             return error_page(409)
         except runner.LockBusy:

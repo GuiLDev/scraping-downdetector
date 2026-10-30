@@ -2,11 +2,15 @@
 {% from "_macros.html" import state_badge, demo_badge %}
 {% block title %}Painel{% endblock %}
 {% block content %}
-{% if coleta_paused and csrf_token is defined %}
+{% if csrf_token is defined %}
+{% for origem in resume_origins %}
 <form class="resume-form" method="post" action="{{ url_for('resume_collection') }}">
   <input type="hidden" name="csrf" value="{{ csrf_token }}">
+  <input type="hidden" name="origem" value="{{ origem }}">
+  {% if show_origin %}<span class="muted">{{ origem }}</span>{% endif %}
   <button type="submit">Retomar verificação</button>
 </form>
+{% endfor %}
 {% endif %}
 
 <section class="summary" aria-label="Resumo da verificação">

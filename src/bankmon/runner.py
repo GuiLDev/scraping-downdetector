@@ -285,12 +285,13 @@ def record_result(
     trigger: str,
     clock: Clock | None = None,
     expected_collector: str | None = None,
-    on_record: Callable[[sqlite3.Connection], None] | None = None,
+    on_record: Callable[[sqlite3.Connection, CollectionResult], None] | None = None,
 ) -> RunOutcome:
     """Grava run + observations + state_transitions numa unica transacao.
 
-    `on_record(conn)` roda DENTRO da transacao, logo apos inserir a execucao: se ele ou qualquer
-    gravacao seguinte falhar, tudo (inclusive o que `on_record` fez) volta atras.
+    `on_record(conn, result)` roda DENTRO da transacao, logo apos inserir a execucao, com o resultado
+    JA VALIDADO (o que foi gravado): se ele ou qualquer gravacao seguinte falhar, tudo (inclusive o
+    que `on_record` fez) volta atras.
 
     A transicao compara o estado efetivo imediatamente antes (com expiracao
     aplicada em `finished_at`) com o estado depois, por instituicao habilitada.
@@ -306,7 +307,7 @@ def record_result(
         previous = db.latest_run(conn)
         run_id = db.insert_run(conn, result, trigger)
         if on_record is not None:
-            on_record(conn)
+            on_record(conn, result)
         db.insert_observations(conn, run_id, result.observations)
         if result.source is not None:
             db.insert_run_source(conn, run_id, result.source, clock())
@@ -355,10 +356,11 @@ def collect_and_record(
     collector: Collector,
     trigger: str,
     clock,
-    on_record: Callable[[sqlite3.Connection], None] | None = None,
+    on_record: Callable[[sqlite3.Connection, CollectionResult], None] | None = None,
 ) -> RunOutcome:
     """Coleta e grava (numa transacao) com a conexao dada. O CHAMADOR deve segurar `file_lock`:
-    serve a quem precisa de outras leituras/gravacoes na mesma secao critica (ex.: estado da coleta)."""
+    serve a quem precisa de outras leituras/gravacoes na mesma secao critica (ex.: estado da coleta).
+    `on_record(conn, result)`: ver `record_result` (roda na transacao da execucao)."""
     result = _collect_safely(collector, conn, cfg, clock)
     return record_result(conn, cfg, result, trigger, clock, collector.name, on_record=on_record)
 
