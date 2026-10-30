@@ -1,6 +1,6 @@
 {
   "manifest_version": 3,
-  "name": "Coletor Bank Monitor (aba do navegador)",
+  "name": "BankMonitor — Coleta Automática",
   "version": "0.1.0",
   "description": "Recarrega, em segundo plano, a aba ja aberta pelo usuario e envia o HTML ao servidor local do Bank Monitor.",
   "permissions": ["scripting", "alarms", "storage"],

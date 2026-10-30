@@ -276,12 +276,16 @@ def cmd_serve(cfg: Config, args: argparse.Namespace) -> int:
 
 def cmd_extensao(cfg: Config, args: argparse.Namespace) -> int:
     try:
-        folder = extension.build_extension(cfg, args.alvo, args.intervalo)
+        folder = extension.build_extension(cfg, args.alvo, args.intervalo, pontual=args.pontual)
     except (ValueError, FileNotFoundError) as exc:
         print(f"Erro: {safe_text(str(exc))}", file=sys.stderr)
         return EXIT_FAIL
     print(f"Extensão gerada em {folder}")
-    print(f"  alvo: {safe_text(args.alvo)}  intervalo: {args.intervalo:g} min  servidor: {extension.server_url(cfg)}")
+    interval = (
+        "modo: leitura pontual (acione com coletarAgora())"
+        if args.pontual else f"intervalo: {args.intervalo or extension.DEFAULT_INTERVAL_MIN:g} min"
+    )
+    print(f"  alvo: {safe_text(args.alvo)}  {interval}  servidor: {extension.server_url(cfg)}")
     print("Para usar: abra a página de extensões do navegador (Edge, Opera GX ou Chrome), ative o")
     print("modo desenvolvedor e use \"Carregar sem pacote\" apontando para a pasta acima; abra a aba do")
     print("alvo e rode `python -m bankmon serve --navegador`. O token fica só em data/ (fora do git).")
@@ -387,8 +391,11 @@ def build_parser() -> argparse.ArgumentParser:
     mode.add_argument("--navegador", action="store_true", help="liga a API da coleta pela aba do navegador")
     ext = sub.add_parser("extensao", help="gera a extensão do navegador em data/extensao-coletor/")
     ext.add_argument("--alvo", required=True, help="URL da aba a ler (origem listada em [coleta_navegador])")
-    ext.add_argument("--intervalo", type=float, default=extension.DEFAULT_INTERVAL_MIN, metavar="MIN",
-                     help="minutos entre leituras (mínimo 0,5)")
+    ext.add_argument("--intervalo", type=float, default=None, metavar="MIN",
+                     help=f"minutos entre leituras (mínimo 0,5; padrão {extension.DEFAULT_INTERVAL_MIN:g}; "
+                          "não vale com --pontual)")
+    ext.add_argument("--pontual", action="store_true",
+                     help="leitura pontual manual do DOM já carregado, sem alarme (exige leitura = \"pontual\" no TOML)")
     sub.add_parser("init-db", help="cria o banco e sincroniza o TOML")
     sub.add_parser("check-config", help="valida o TOML")
     collect = sub.add_parser("collect", help="executa uma coleta")

@@ -69,6 +69,10 @@ BROWSER_BANNER_SIMULATION = (
     "COLETA PELO NAVEGADOR — SIMULAÇÃO LOCAL (páginas de teste, não é o Downdetector)"
 )
 BROWSER_BANNER_EXTERNAL = "COLETA PELO NAVEGADOR — leitura da aba aberta pelo usuário (origem autorizada)"
+BROWSER_BANNER_PONTUAL = (
+    "LEITURA PONTUAL — DOM da aba aberta pelo usuário, acionada manualmente; sem coleta automática"
+)
+ON_DEMAND = "sob demanda"
 PAUSED_NOTICE = (
     "Coleta pausada: bloqueio detectado às {at}. Resolva manualmente na aba do navegador e clique em "
     "Retomar verificação. Os dados exibidos estão desatualizados."
@@ -91,6 +95,8 @@ VERIFYING_NOTICE = "Verificação solicitada; aguardando a próxima leitura da a
 def offline_banner(cfg: Config, snap: "Snapshot | None") -> str | None:
     """Texto da faixa do modo (offline ou navegador; None nos demais). Texto puro, autoescapado."""
     if cfg.is_browser:
+        if cfg.browser_pontual:
+            return BROWSER_BANNER_PONTUAL
         return BROWSER_BANNER_EXTERNAL if cfg.browser_external else BROWSER_BANNER_SIMULATION
     if not cfg.is_offline:
         return None
@@ -279,6 +285,8 @@ def build_notices(
 
     if cfg.is_offline:
         header["next"] = HISTORICAL
+    elif cfg.is_browser and cfg.browser_pontual:
+        header["next"] = ON_DEMAND
     elif latest is not None:
         nxt = latest.finished_at + timedelta(minutes=cfg.interval_minutes)
         header["next"] = hm(nxt) + (" (atrasada)" if nxt < now else "")

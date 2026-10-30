@@ -192,3 +192,65 @@ def test_path_prefix_matches_the_exact_page_and_subpaths_but_not_siblings():
 def test_works_without_the_tabs_permission_using_only_host_permissions():
     rep = run_scenario(readings=[reading(12), reading(12)])  # o harness esconde `url` fora dos host_permissions
     assert rep["forbidden"] == [] and rep["reloads"] == [1] and set(rep["scripted"]) == {1} and len(rep["posts"]) == 1
+
+
+# --- leitura pontual (config.json com `pontual: true`) -----------------------------------------------
+
+
+def test_pontual_never_creates_an_alarm_and_clears_an_existing_one():
+    rep = run_scenario(mode="alarm", config={"pontual": True})
+    assert rep["alarms"] == [] and rep["cleared"] == ["bankmon-coleta"]
+
+
+def test_pontual_reserves_but_never_reloads_and_posts_the_current_dom():
+    rep = run_scenario(config={"pontual": True}, readings=[reading(12, "<html>atual</html>"), reading(12, "<html>atual</html>")])
+    assert rep["reloads"] == [] and rep["forbidden"] == []
+    assert rep["order"] == ["estado", "reserva", "post"]
+    (post,) = rep["posts"]
+    assert post["body"] == {"url": "http://127.0.0.1:8777/dd?x=1", "html": "<html>atual</html>",
+                            "reserva_id": "RES-1", "modo": "pontual"}
+    assert rep["result"]["resultado"] == "enviado"
+
+
+def test_pontual_refused_reservation_reads_and_posts_nothing():
+    rep = run_scenario(config={"pontual": True}, reservaStatus=429, readings=[reading()])
+    assert rep["reloads"] == [] and rep["posts"] == [] and rep["reads"] == 0
+    assert rep["result"]["resultado"] == "intervalo"
+
+
+def test_pontual_paused_state_does_nothing():
+    rep = run_scenario(config={"pontual": True}, estado="pausado", readings=[reading()])
+    assert rep["reservas"] == [] and rep["posts"] == [] and rep["reads"] == 0
+
+
+def test_without_the_pontual_flag_the_alarm_is_still_created():
+    assert len(run_scenario(mode="alarm", config={"pontual": False})["alarms"]) == 1
+
+
+def test_pontual_reservation_carries_modo_pontual_and_normal_one_does_not():
+    rep = run_scenario(config={"pontual": True}, readings=[reading(12), reading(12)])
+    assert rep["reservas"][0]["body"] == {"alvo": "http://127.0.0.1:8777/dd", "modo": "pontual"}
+    rep = run_scenario(readings=[reading(12), reading(12)])
+    assert rep["reservas"][0]["body"] == {"alvo": "http://127.0.0.1:8777/dd"}
+
+
+def test_normal_extension_with_a_409_reservation_never_reloads():
+    rep = run_scenario(reservaStatus=409, reservaBody={"erro": "pontual"}, readings=[reading()])
+    assert rep["reloads"] == [] and rep["posts"] == [] and rep["reads"] == 0
+
+
+def test_pontual_ignores_the_verifying_state_and_follows_the_reservation_path():
+    rep = run_scenario(config={"pontual": True}, estado="verificando", readings=[reading(12), reading(12)])
+    assert rep["reloads"] == [] and rep["order"] == ["estado", "reserva", "post"]
+    assert rep["posts"][0]["body"]["modo"] == "pontual" and rep["posts"][0]["body"]["reserva_id"] == "RES-1"
+
+
+def test_a_leftover_alarm_with_pontual_config_clears_itself_and_does_nothing():
+    rep = run_scenario(mode="fire_alarm", config={"pontual": True}, readings=[reading()])
+    assert rep["reads"] == 0 and rep["reservas"] == [] and rep["posts"] == [] and rep["estadoGets"] == 0
+    assert rep["cleared"].count("bankmon-coleta") >= 2 and rep["reloads"] == []
+
+
+def test_a_normal_alarm_still_collects():
+    rep = run_scenario(mode="fire_alarm", readings=[reading(12), reading(12)])
+    assert len(rep["posts"]) == 1 and rep["reloads"] == [1]

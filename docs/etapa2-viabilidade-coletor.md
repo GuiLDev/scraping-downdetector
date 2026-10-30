@@ -91,11 +91,31 @@ Essas regras também estão em `.claude/agents/scraping-specialist.md`.
 3. Confirmar com o jurídico se dados, cores ou capturas do Downdetector podem ser citados nos comunicados aos clientes.
 4. Com a autorização registrada aqui (data, escopo, referência do contrato ou e-mail), o `scraping-specialist` implementa o coletor correspondente, seguido de `qa-tester` e `security-reviewer`.
 
+## Leitura pontual — decisão interna
+
+**Decisão do responsável em 2026-10-30 (D1). É uma regra interna do projeto, não uma autorização do Downdetector.** Não entra em "Autorizações registradas" e não usa `autorizacao_ref`.
+
+Leitura pontual permitida: uma leitura do DOM já carregado na aba aberta pelo responsável, acionada manualmente, sem recarga, sem agendamento e sem nenhuma requisição da extensão ao site. A extensão nunca interage com desafios. **Não é autorização do serviço.** Toda coleta periódica ou automática continua exigindo autorização registrada.
+
+- **Viabilidade técnica:** ler o DOM renderizado de uma aba aberta não faz requisição ao site. O recurso fica restrito a `[coleta_navegador] leitura = "pontual"`, com uma única origem, extensão gerada com `extensao --pontual` e banco separado.
+- **O que o servidor garante:**
+  - token obrigatório;
+  - origem da lista;
+  - com config pontual, a reserva e a leitura exigem `modo: "pontual"`; qualquer outro modo é recusado sem gravar nada (409; na leitura, modo desconhecido: 400), e sem reserva a extensão não recarrega;
+  - reserva válida consumida junto com a leitura;
+  - no máximo 1 reserva a cada 60 min para origem externa (em loopback vale `intervalo_minimo_local_s`);
+  - suspensão se o DOM for um desafio (em origem externa, sem retomada).
+- **O que só a extensão garante:** o acionamento manual (`coletarAgora()`), sem alarme e sem `tabs.reload`. O servidor não distingue um clique humano de um processo local que tenha o token (SEC-002).
+- **Mitigação operacional do SEC-002 (decidida em 2026-10-30):** o servidor pontual sobe só durante a leitura, com token próprio na pasta de dados separada, e é encerrado logo depois. Com o limite de 1 reserva a cada 60 min, isso dá uma leitura por sessão. Esse é o risco residual aceito.
+- **Procedimento obrigatório (SEC-008):** `extensao --pontual` e `serve --navegador` rodam com o **mesmo** `BANKMON_DATA_DIR` próprio (`data/leitura-pontual/data`, fora do git), e a mesma pasta é usada em todas as sessões. Sem essa variável, o modo pontual usaria o token e o banco padrão de `data/`. Trocar de pasta zera o limite de 60 min e a suspensão, que valem por banco.
+- **Condições externas, em aberto (D2):** os termos de uso do Downdetector sobre extração e reprodução ainda não foram lidos (a mesma questão da exportação manual de 28/10). O `robots.txt` veta coletores; a leitura pontual não faz requisição. O Cloudflare não é tocado: o responsável acessa como visitante e a extensão não interage com desafios. O uso dos dados fica restrito à validação interna.
+- Se o DOM lido for um desafio, a leitura é gravada como `inaccessible` e a origem é suspensa, sem retomada.
+
 ## Autorizações registradas
 
 Uma origem externa na coleta pelo navegador (`[coleta_navegador]` no TOML) só é aceita se o `autorizacao_ref` for igual a um identificador listado aqui, no formato `- `ID`: data, escopo, referência do contrato ou e-mail`. A frequência máxima para origem externa é 1 leitura por hora, e um desafio de verificação suspende a coleta até revisão desta autorização.
 
-Nenhuma autorização registrada até agora (origem externa sempre recusada).
+Nenhuma autorização registrada até agora (origem externa recusada, exceto na leitura pontual, que não é autorização; ver "Leitura pontual — decisão interna").
 
 ## Referências
 

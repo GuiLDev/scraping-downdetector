@@ -262,6 +262,7 @@ def ingest(
     reserva_id: str | None = None,
     verification: bool = False,
     collector_factory: Callable[[str, str, datetime], BrowserHtmlCollector] = BrowserHtmlCollector,
+    label: str = "",
 ) -> IngestOutcome:
     """Checa pausa e reserva, roda o coletor e atualiza o estado da origem, tudo sob o lock do runner.
 
@@ -297,5 +298,8 @@ def ingest(
             state = origin_state(origin, conn)
         finally:
             conn.close()
-    log.info("Coleta do navegador: execução %d, status=%s, estado=%s", outcome.run_id, status, state.estado)
+    log.info(
+        "Coleta do navegador: execução %d, status=%s, estado=%s%s",
+        outcome.run_id, status, state.estado, f" ({label})" if label else "",
+    )
     return IngestOutcome(state.estado, outcome.run_id, collector.page_state, len(outcome.result.services))

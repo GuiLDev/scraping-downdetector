@@ -4,6 +4,7 @@ Estas regras valem para a sessão principal, os agentes e as skills deste projet
 
 ## Fonte de dados (inegociável)
 - **Nenhum acesso automatizado ao Downdetector real** sem autorização registrada em `docs/etapa2-viabilidade-coletor.md`, seção "Autorizações registradas". Isso vale para curl, WebFetch, scripts, Playwright, `with_server.py`, a extensão de coleta e qualquer outra forma de automação.
+- **Exceção estreita, decisão interna de 2026-10-30 (D1).** Leitura pontual permitida: uma leitura do DOM já carregado na aba aberta pelo responsável, acionada manualmente, sem recarga, sem agendamento e sem nenhuma requisição da extensão ao site. A extensão nunca interage com desafios. **Não é autorização do serviço.** Toda coleta periódica ou automática continua exigindo autorização registrada. Detalhes em `docs/etapa2-viabilidade-coletor.md`, seção "Leitura pontual — decisão interna".
 - **Nunca contornar Cloudflare, CAPTCHA ou desafios:**
   - nada de headless ou automação para passar desafio;
   - nada de imitar fingerprint ou user-agent, nem usar proxies;

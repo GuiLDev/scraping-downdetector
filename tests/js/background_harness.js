@@ -117,6 +117,11 @@ vm.runInContext(fs.readFileSync(scriptPath, "utf8"), context);
       await new Promise((r) => setImmediate(r));
       await new Promise((r) => setImmediate(r));
       report.hasAlarmHandler = typeof report.alarmHandler === "function";
+    } else if (sc.mode === "fire_alarm") {
+      for (let i = 0; i < 5; i++) await new Promise((r) => setImmediate(r)); // garantirAlarme inicial
+      report.alarmHandler({ name: "bankmon-coleta" });
+      await new Promise((r) => setTimeout(r, 0));
+      for (let i = 0; i < 200; i++) await new Promise((r) => setImmediate(r));
     } else {
       report.result = await context.coletarAgora();
     }

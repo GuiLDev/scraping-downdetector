@@ -22,6 +22,8 @@ DEFAULT_CONFIG_PATH = PROJECT_ROOT / "config" / "institutions.toml"
 SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
 MAX_STALE_MINUTES = 1440
 DEFAULT_LOCAL_INTERVAL_S = 30
+READING_AUTOMATIC = "automatica"
+READING_PONTUAL = "pontual"
 NO_ORIGINS_MESSAGE = (
     "nenhuma origem autorizada para a coleta pelo navegador: liste as origens exatas em "
     "[coleta_navegador] origens_autorizadas (ex.: [\"http://127.0.0.1:8791\"])"
@@ -79,6 +81,12 @@ class Config:
     browser_origins: tuple[str, ...] = ()
     browser_authorization_ref: str = ""
     browser_local_interval_s: int = DEFAULT_LOCAL_INTERVAL_S
+    # "automatica" (padrao) ou "pontual": uma leitura manual do DOM ja carregado, sem agendamento.
+    browser_reading: str = READING_AUTOMATIC
+
+    @property
+    def browser_pontual(self) -> bool:
+        return self.browser_reading == READING_PONTUAL
 
     @property
     def browser_external(self) -> bool:
@@ -181,7 +189,9 @@ def load_config(
     categories = _parse_categories(raw.get("categories"))
     institutions = _parse_institutions(raw.get("institutions"), {c.id for c in categories})
 
-    browser_origins, auth_ref, local_interval = _parse_browser_section(raw.get("coleta_navegador"))
+    browser_origins, auth_ref, local_interval, reading = _parse_browser_section(
+        raw.get("coleta_navegador")
+    )
     return Config(
         config_path=cfg_path,
         data_dir=resolve_data_dir(data_dir),
@@ -196,6 +206,7 @@ def load_config(
         browser_origins=browser_origins,
         browser_authorization_ref=auth_ref,
         browser_local_interval_s=local_interval,
+        browser_reading=reading,
     )
 
 
@@ -209,10 +220,10 @@ def registered_authorizations() -> set[str]:
     return set(re.findall(r"(?m)^- `([A-Za-z0-9._-]+)`", m.group(1))) if m else set()
 
 
-def _parse_browser_section(raw) -> tuple[tuple[str, ...], str, int]:
-    """`[coleta_navegador]`: origens exatas, `autorizacao_ref` (so p/ externa) e intervalo local."""
+def _parse_browser_section(raw) -> tuple[tuple[str, ...], str, int, str]:
+    """`[coleta_navegador]`: origens exatas, `autorizacao_ref` (so p/ externa), intervalo local e `leitura`."""
     if raw is None:
-        return (), "", DEFAULT_LOCAL_INTERVAL_S
+        return (), "", DEFAULT_LOCAL_INTERVAL_S, READING_AUTOMATIC
     if not isinstance(raw, dict):
         raise ConfigError("[coleta_navegador] deve ser uma tabela")
     listed = raw.get("origens_autorizadas", [])
@@ -222,6 +233,11 @@ def _parse_browser_section(raw) -> tuple[tuple[str, ...], str, int]:
     if not isinstance(ref, str):
         raise ConfigError("[coleta_navegador] autorizacao_ref deve ser str")
     ref = ref.strip()
+    reading = raw.get("leitura", READING_AUTOMATIC)
+    if "leitura" in raw and reading != READING_PONTUAL:
+        raise ConfigError(
+            f'[coleta_navegador] leitura deve ser "{READING_PONTUAL}" (ou ausente, para o modo automático)'
+        )
     interval = raw.get("intervalo_minimo_local_s", DEFAULT_LOCAL_INTERVAL_S)
     if not isinstance(interval, int) or isinstance(interval, bool) or interval < 0:
         raise ConfigError("[coleta_navegador] intervalo_minimo_local_s deve ser inteiro >= 0")
@@ -229,6 +245,18 @@ def _parse_browser_section(raw) -> tuple[tuple[str, ...], str, int]:
         external = [o for o in listed if not origins.is_loopback_pattern(o)]
     except ValueError as exc:
         raise ConfigError(f"[coleta_navegador] origens_autorizadas: {exc}") from None
+    if reading == READING_PONTUAL:
+        # Leitura pontual NAO e autorizacao do servico: aceita uma unica origem (inclusive externa),
+        # sem `autorizacao_ref` (que fica reservado a coleta automatica autorizada).
+        if ref:
+            raise ConfigError(
+                "[coleta_navegador] leitura pontual não é autorização: remova autorizacao_ref"
+            )
+        if len(listed) != 1:
+            raise ConfigError(
+                "[coleta_navegador] leitura pontual exige exatamente uma origem em origens_autorizadas"
+            )
+        return tuple(o.strip().lower() for o in listed), "", interval, reading
     if external and not ref:
         raise ConfigError(
             "[coleta_navegador] origem externa exige autorizacao_ref não vazio "
@@ -246,7 +274,7 @@ def _parse_browser_section(raw) -> tuple[tuple[str, ...], str, int]:
             "[coleta_navegador] origem externa deve ser a única origem em origens_autorizadas "
             "(restrição temporária INF-01)"
         )
-    return tuple(o.strip().lower() for o in listed), ref, interval
+    return tuple(o.strip().lower() for o in listed), ref, interval, reading
 
 
 def _is_loopback_ip(host: str) -> bool:

@@ -10,6 +10,10 @@ Fluxo da extensao: `GET /api/coleta/estado` (so consulta) -> `POST /api/coleta/r
 vaga ANTES de recarregar) -> recarga -> `POST /api/coleta` com o `reserva_id`. No estado
 `verificando` ela envia o DOM atual com `modo: "verificacao"`, sem recarga nem reserva.
 
+Com `leitura = "pontual"` na config, so existe `modo: "pontual"`: UMA leitura manual do DOM ja
+carregado, pelo caminho NORMAL da reserva (`reserva_id` obrigatorio, nunca o modo `verificacao`).
+Sem esse modo, uma config pontual responde 409; com config normal, `pontual` e "modo desconhecido".
+
 Este modulo so trata HTTP; as gravacoes ficam em `bankmon.browser_service`.
 O token (`X-BankMonitor-Token`) nunca e logado nem devolvido em respostas.
 """
@@ -29,6 +33,7 @@ from bankmon.timeutil import to_iso
 
 TOKEN_HEADER = "X-BankMonitor-Token"
 MAX_BODY_BYTES = 6 * 1024 * 1024
+PONTUAL_MODE = "pontual"  # leitura manual do DOM ja carregado; so com `leitura = "pontual"` na config
 
 
 def _same(a: str, b: str) -> bool:
@@ -69,6 +74,12 @@ def register(
             return refuse(400, "corpo esperado: JSON {alvo}")
         if not origins.is_authorized(alvo, cfg.browser_origins):
             return refuse(403, "origem não autorizada")
+        modo = body.get("modo")
+        if cfg.browser_pontual:
+            if modo != PONTUAL_MODE:
+                return refuse(409, 'config de leitura pontual: a reserva exige modo "pontual"')
+        elif modo is not None:
+            return refuse(400, "modo desconhecido")
         try:
             reservation = browser_service.reserve(cfg, alvo, clock())
         except browser_service.Paused:
@@ -93,8 +104,12 @@ def register(
         reserva_id, modo = body.get("reserva_id"), body.get("modo")
         if reserva_id is not None and not isinstance(reserva_id, str):
             return refuse(400, "reserva_id deve ser texto")
-        if modo not in (None, browser_service.VERIFICATION_MODE):
+        if modo not in (None, browser_service.VERIFICATION_MODE) and not (
+            modo == PONTUAL_MODE and cfg.browser_pontual
+        ):
             return refuse(400, "modo desconhecido")
+        if cfg.browser_pontual and modo != PONTUAL_MODE:
+            return refuse(409, 'config de leitura pontual: só aceita modo "pontual"')
         url = body.get("url")
         if not origins.is_authorized(url, cfg.browser_origins):
             return refuse(403, "origem não autorizada")
@@ -102,6 +117,7 @@ def register(
             out = browser_service.ingest(
                 cfg, url, body["html"], clock(), reserva_id=reserva_id,
                 verification=modo == browser_service.VERIFICATION_MODE,
+                label="leitura pontual" if modo == PONTUAL_MODE else "",
             )
         except browser_service.Paused:
             return refuse(409, "coleta pausada: veja o painel")

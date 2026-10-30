@@ -8,6 +8,10 @@
 // "Retomar verificacao"), le o DOM ATUAL da aba, sem recarregar e sem reservar, e o envia com
 // `modo: "verificacao"`.
 //
+// MODO PONTUAL (`pontual: true` em config.json): NAO ha alarme. So `coletarAgora()`, acionado a mao
+// pelo responsavel, faz UMA leitura: consulta o estado, reserva a vaga e le o DOM que a aba JA mostra
+// (sem recarregar), enviando-o com o `reserva_id` e `modo: "pontual"`.
+//
 // O QUE NUNCA FAZ (proibicoes deliberadas; nao as remova):
 //  - nao le, copia nem envia cookies, storage da pagina, cabecalhos ou credenciais (sem permissao
 //    "cookies"; so o HTML da aba e enviado);
@@ -64,7 +68,7 @@ async function reservar(cfg) {
   const resp = await fetch(cfg.servidor + "/api/coleta/reserva", {
     method: "POST",
     headers: { "Content-Type": "application/json", "X-BankMonitor-Token": cfg.token },
-    body: JSON.stringify({ alvo: cfg.alvo }),
+    body: JSON.stringify(cfg.pontual ? { alvo: cfg.alvo, modo: "pontual" } : { alvo: cfg.alvo }),
   });
   exigirAutorizado(resp);
   if (resp.status === 429) return { recusada: "intervalo", retryAfter: resp.headers && resp.headers.get ? resp.headers.get("Retry-After") : null };
@@ -172,7 +176,7 @@ async function coletar() {
   if (estado === "pausado") return { resultado: "pausado" };
   const aba = await acharAba(cfg.alvo);
   if (!aba) return { resultado: "sem_aba" };
-  if (estado === "verificando") {
+  if (estado === "verificando" && !cfg.pontual) {
     // Sem recarga e sem reserva: so le o que a pagina ja mostra (o usuario a resolveu na aba).
     const atual = await aguardarProntidao(aba.id);
     if (grandeDemais(atual.html)) return { resultado: "html_grande_demais" };
@@ -180,6 +184,13 @@ async function coletar() {
   }
   const reserva = await reservar(cfg);
   if (reserva.recusada) return { resultado: reserva.recusada, retryAfter: reserva.retryAfter };
+  if (cfg.pontual) {
+    // Leitura pontual: sem recarga; so le o DOM atual da aba que o usuario ja abriu.
+    const atual = await aguardarProntidao(aba.id);
+    if (grandeDemais(atual.html)) return { resultado: "html_grande_demais" };
+    const http = await enviar(cfg, aba.url, atual.html, { reserva_id: reserva.reservaId, modo: "pontual" });
+    return { resultado: "enviado", http };
+  }
   if (!(await recarregarEAguardar(aba.id))) return { resultado: "carregamento_incompleto" };
   const leitura = await aguardarProntidao(aba.id);
   if (grandeDemais(leitura.html)) return { resultado: "html_grande_demais" };
@@ -218,13 +229,36 @@ async function coletarAgora() {
 
 async function garantirAlarme() {
   const cfg = await carregarConfig();
+  if (cfg.pontual) {
+    // Pontual nao tem agendamento: nenhum alarme, e um eventual alarme antigo e removido.
+    if (chrome.alarms) await chrome.alarms.clear(ALARME);  // o manifesto pontual nao tem a permissao
+    return;
+  }
   const periodInMinutes = Math.max(INTERVALO_MIN_MIN, Number(cfg.intervalo_min) || INTERVALO_MIN_MIN);
   chrome.alarms.create(ALARME, { periodInMinutes });
 }
 
-chrome.alarms.onAlarm.addListener((alarme) => {
-  if (alarme.name === ALARME) coletarAgora();
-});
+// Alarme que sobrou de uma instalacao anterior nao dispara leitura em modo pontual: so se limpa.
+async function aoAlarme(alarme) {
+  if (alarme.name !== ALARME) return;
+  let cfg = null;
+  try {
+    cfg = await carregarConfig();
+  } catch (_) {
+    /* sem config legivel: segue o fluxo normal (coletarAgora trata o erro) */
+  }
+  if (cfg && cfg.pontual) {
+    try {
+      await chrome.alarms.clear(ALARME);
+    } catch (_) {
+      /* sem alarme a limpar */
+    }
+    return;
+  }
+  coletarAgora();
+}
+
+if (chrome.alarms) chrome.alarms.onAlarm.addListener(aoAlarme);
 chrome.runtime.onInstalled.addListener(() => garantirAlarme());
 chrome.runtime.onStartup.addListener(() => garantirAlarme());
 garantirAlarme().catch(() => {}); // o service worker pode acordar sem onInstalled/onStartup

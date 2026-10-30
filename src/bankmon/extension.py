@@ -64,13 +64,33 @@ def server_url(cfg: Config) -> str:
     return f"http://{host}:{cfg.port}"
 
 
-def build_extension(cfg: Config, target: str, interval_min: float) -> Path:
-    """Escreve `data/extensao-coletor/` (manifest, background.js e config.json); devolve a pasta."""
+PONTUAL_NAME = "BankMonitor — Leitura Pontual"  # distinta da automatica no gerenciador do navegador
+PONTUAL_DESCRIPTION = (
+    "Lê, sob acionamento manual, o DOM da aba já aberta pelo usuário e envia ao servidor local do "
+    "Bank Monitor (sem recarga)."
+)
+
+
+def build_extension(cfg: Config, target: str, interval_min: float | None, pontual: bool = False) -> Path:
+    """Escreve `data/extensao-coletor/` (manifest, background.js e config.json); devolve a pasta.
+
+    `pontual` tem de coincidir com a config (`leitura = "pontual"`): extensao automatica nao usa uma
+    config pontual e vice-versa. Pontual nao tem alarme: nao aceita intervalo, nao pede a permissao
+    `alarms` e nao grava `intervalo_min`.
+    """
+    if pontual and interval_min is not None:
+        raise ValueError("--intervalo não se aplica à leitura pontual (não há alarme)")
+    if interval_min is None:
+        interval_min = DEFAULT_INTERVAL_MIN
+    if pontual and not cfg.browser_pontual:
+        raise ValueError('--pontual exige leitura = "pontual" em [coleta_navegador]')
+    if cfg.browser_pontual and not pontual:
+        raise ValueError("a configuração é de leitura pontual: gere a extensão com --pontual")
     validate_target(target, cfg.browser_origins)
     target = origins.normalize_target(target)
     if not interval_min >= MIN_INTERVAL_MIN:
         raise ValueError("intervalo mínimo: 0,5 minuto")
-    if not origins.is_loopback_url(target) and interval_min < EXTERNAL_MIN_INTERVAL_MIN:
+    if not pontual and not origins.is_loopback_url(target) and interval_min < EXTERNAL_MIN_INTERVAL_MIN:
         raise ValueError(f"intervalo mínimo para origem externa: {EXTERNAL_MIN_INTERVAL_MIN:g} minutos")
     if not TEMPLATE_DIR.is_dir():
         raise FileNotFoundError(f"modelo da extensão não encontrado: {TEMPLATE_DIR}")
@@ -80,6 +100,12 @@ def build_extension(cfg: Config, target: str, interval_min: float) -> Path:
     manifest = json.loads((TEMPLATE_DIR / "manifest.json").read_text(encoding="utf-8"))
     manifest["host_permissions"] = list(dict.fromkeys([host_permission(server), host_permission(target)]))
     config = {"servidor": server, "token": token, "alvo": target, "intervalo_min": interval_min}
+    if pontual:
+        config.pop("intervalo_min")
+        config["pontual"] = True
+        manifest["permissions"] = [p for p in manifest["permissions"] if p != "alarms"]
+        manifest["name"] = PONTUAL_NAME
+        manifest["description"] = PONTUAL_DESCRIPTION
 
     out = cfg.data_dir / OUTPUT_DIR
     out.mkdir(parents=True, exist_ok=True)
