@@ -254,3 +254,66 @@ def test_a_leftover_alarm_with_pontual_config_clears_itself_and_does_nothing():
 def test_a_normal_alarm_still_collects():
     rep = run_scenario(mode="fire_alarm", readings=[reading(12), reading(12)])
     assert len(rep["posts"]) == 1 and rep["reloads"] == [1]
+
+
+# --- clique no icone (extensao pontual real: sem `chrome.alarms`, com `chrome.action`) ----------------
+
+PONTUAL_REAL = {"noAlarms": True, "withAction": True, "config": {"pontual": True}}
+
+
+def click(**scenario):
+    return run_scenario(mode="click", **{**PONTUAL_REAL, **scenario})
+
+
+def test_click_runs_one_pontual_reading_without_reload_and_shows_ok():
+    rep = click(readings=[reading(12, "<html>atual</html>"), reading(12, "<html>atual</html>")])
+    assert "error" not in rep and rep["clickListeners"] == 1 and rep["alarms"] == []
+    assert rep["reloads"] == [] and rep["forbidden"] == []
+    assert rep["order"] == ["estado", "reserva", "post"]
+    assert rep["reservas"][0]["body"] == {"alvo": "http://127.0.0.1:8777/dd", "modo": "pontual"}
+    (post,) = rep["posts"]
+    assert post["body"]["modo"] == "pontual" and post["body"]["reserva_id"] == "RES-1"
+    assert rep["badges"] == ["...", "OK"]
+    assert "TOKEN-DE-TESTE" not in json.dumps(rep["titles"]) and "<html>" not in json.dumps(rep["titles"])
+    assert "enviado (200)" in rep["titles"][-1]
+
+
+def test_click_with_a_refused_interval_shows_60m_and_reads_nothing():
+    rep = click(reservaStatus=429, readings=[reading()])
+    assert rep["badges"][-1] == "60m" and rep["reads"] == 0 and rep["posts"] == [] and rep["reloads"] == []
+
+
+def test_click_without_the_tab_shows_aba():
+    rep = click(tabs=[{"id": 9, "url": "http://127.0.0.1:1/x", "active": True}], readings=[reading()])
+    assert rep["badges"][-1] == "ABA" and rep["posts"] == [] and rep["reservas"] == []
+
+
+@pytest.mark.parametrize("scenario", [{"postStatus": 500}, {"reservaStatus": 500}, {"estadoStatus": 500}])
+def test_click_shows_err_for_other_outcomes(scenario):
+    rep = click(readings=[reading(12), reading(12)], **scenario)
+    assert rep["badges"][-1] == "ERR"
+
+
+def test_click_on_unauthorized_shows_err_without_throwing():
+    rep = click(reservaStatus=401, readings=[reading()])
+    assert "error" not in rep and rep["badges"][-1] == "ERR" and rep["posts"] == []
+
+
+def test_automatic_extension_registers_no_click_listener_and_keeps_the_alarm():
+    rep = run_scenario(mode="click", readings=[reading()])  # sem `chrome.action`
+    assert rep["hasClickHandler"] is False and rep["reservas"] == [] and rep["posts"] == []
+    assert len(run_scenario(mode="alarm", withAction=False)["alarms"]) == 1
+
+
+def test_click_is_ignored_when_the_config_is_not_pontual():
+    rep = run_scenario(mode="click", withAction=True, readings=[reading(12), reading(12)])
+    assert rep["clickListeners"] == 1
+    assert rep["estadoGets"] == 0 and rep["reservas"] == [] and rep["posts"] == [] and rep["reloads"] == []
+    assert rep["badges"] == []
+
+
+def test_pontual_without_chrome_alarms_loads_and_collects_and_handles_401():
+    rep = run_scenario(noAlarms=True, config={"pontual": True}, readings=[reading(12), reading(12)])
+    assert "error" not in rep and rep["result"]["resultado"] == "enviado" and rep["reloads"] == []
+    rep = run_scenario(noAlarms=True, config={"pontual": True}, reservaStatus=401, readings=[reading()])
+    assert "error" not in rep and rep["result"]["resultado"] == "nao_autorizado"

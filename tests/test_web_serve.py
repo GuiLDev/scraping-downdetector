@@ -53,3 +53,67 @@ def test_serve_rejects_non_loopback_config(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(waitress, "serve", lambda app, **kw: called.append(1))
     assert cli.main(["serve"]) == cli.EXIT_CONFIG
     assert not called
+
+
+# --- Porta ocupada e --abrir ----------------------------------------------------
+
+
+@pytest.mark.real_port
+def test_port_in_use_real_socket():
+    import socket
+
+    with socket.socket() as srv:
+        srv.bind(("127.0.0.1", 0))
+        srv.listen(1)
+        port = srv.getsockname()[1]
+        assert cli.port_in_use("127.0.0.1", port) is True
+    assert cli.port_in_use("127.0.0.1", port) is False  # fechada
+
+
+def test_serve_refuses_busy_port(tmp_path, monkeypatch, capsys):
+    cfg = make_cfg(tmp_path, monkeypatch)
+    called = []
+    monkeypatch.setattr(waitress, "serve", lambda app, **kw: called.append(1))
+    monkeypatch.setattr(cli, "port_in_use", lambda host, port: (host, port) == (cfg.host, cfg.port))
+    assert cli.main(["serve"]) == cli.EXIT_FAIL
+    assert not called
+    cap = capsys.readouterr()
+    assert f"Porta {cfg.port} já está em uso (outro BankMonitor aberto?)" in cap.err
+    assert "Dashboard em" not in cap.out
+
+
+class _SyncTimer:
+    def __init__(self, interval, fn, args=()):
+        self.interval, self.fn, self.args, self.daemon = interval, fn, args, False
+
+    def start(self):
+        self.fn(*self.args)
+
+
+def test_serve_abrir_opens_only_loopback_url(tmp_path, monkeypatch):
+    cfg = make_cfg(tmp_path, monkeypatch)
+    opened = []
+    monkeypatch.setattr(waitress, "serve", lambda app, **kw: None)
+    monkeypatch.setattr(cli.threading, "Timer", _SyncTimer)
+    monkeypatch.setattr(cli.webbrowser, "open", lambda url: opened.append(url))
+    assert cli.main(["serve", "--abrir"]) == cli.EXIT_OK
+    assert opened == [f"http://127.0.0.1:{cfg.port}/"]
+
+
+def test_serve_without_abrir_does_not_open_browser(tmp_path, monkeypatch):
+    make_cfg(tmp_path, monkeypatch)
+    opened = []
+    monkeypatch.setattr(waitress, "serve", lambda app, **kw: None)
+    monkeypatch.setattr(cli.threading, "Timer", _SyncTimer)
+    monkeypatch.setattr(cli.webbrowser, "open", lambda url: opened.append(url))
+    assert cli.main(["serve"]) == cli.EXIT_OK
+    assert opened == []
+
+
+def test_serve_abrir_not_called_when_port_busy(tmp_path, monkeypatch):
+    make_cfg(tmp_path, monkeypatch)
+    opened = []
+    monkeypatch.setattr(cli, "port_in_use", lambda host, port: True)
+    monkeypatch.setattr(cli.webbrowser, "open", lambda url: opened.append(url))
+    assert cli.main(["serve", "--abrir"]) == cli.EXIT_FAIL
+    assert opened == []

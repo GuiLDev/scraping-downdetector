@@ -65,6 +65,7 @@ def server_url(cfg: Config) -> str:
 
 
 PONTUAL_NAME = "BankMonitor — Leitura Pontual"  # distinta da automatica no gerenciador do navegador
+PONTUAL_ACTION_TITLE = "BankMonitor: ler agora a aba do alvo (leitura pontual)"  # tooltip do icone (clique = leitura)
 PONTUAL_DESCRIPTION = (
     "Lê, sob acionamento manual, o DOM da aba já aberta pelo usuário e envia ao servidor local do "
     "Bank Monitor (sem recarga)."
@@ -106,6 +107,7 @@ def build_extension(cfg: Config, target: str, interval_min: float | None, pontua
         manifest["permissions"] = [p for p in manifest["permissions"] if p != "alarms"]
         manifest["name"] = PONTUAL_NAME
         manifest["description"] = PONTUAL_DESCRIPTION
+        manifest["action"] = {"default_title": PONTUAL_ACTION_TITLE}  # so o clique manual; nao e permissao
 
     out = cfg.data_dir / OUTPUT_DIR
     out.mkdir(parents=True, exist_ok=True)

@@ -101,6 +101,21 @@ def test_start_dashboard_cmd_runs_serve_from_root():
     assert r"%~dp0..\.." in text
 
 
+def test_iniciar_leitura_pontual_cmd():
+    raw = (WIN / "iniciar-leitura-pontual.cmd").read_bytes()
+    raw.decode("ascii")  # sem acentos: nao depende de codepage
+    text = raw.decode("ascii")
+    assert r"%~dp0..\.." in text
+    assert r'.venv\Scripts\python.exe" -P -m bankmon serve --navegador --abrir' in text
+    assert r'set "BANKMON_CONFIG=%CD%\data\leitura-pontual\leitura.toml"' in text
+    assert r'set "BANKMON_DATA_DIR=%CD%\data\leitura-pontual\data"' in text
+    assert "SEC-002" in text
+    for line in text.splitlines():
+        if line.strip().lower().startswith("start "):
+            assert "downdetector" not in line.lower()
+    assert "coleta-token" not in text and "extensao --" not in text
+
+
 # --- Linux (systemd --user) ---------------------------------------------------
 
 
@@ -232,6 +247,9 @@ def test_python_P_flag_in_every_execution_point():
     assert "'-P -m bankmon collect --trigger scheduled'" in (WIN / "register-tasks.ps1").read_text("ascii")
     assert "'-P -m bankmon serve'" in (WIN / "register-tasks.ps1").read_text("ascii")
     assert 'python.exe" -P -m bankmon serve' in (WIN / "start-dashboard.cmd").read_text("utf-8")
+    assert 'python.exe" -P -m bankmon serve --navegador --abrir' in (
+        WIN / "iniciar-leitura-pontual.cmd"
+    ).read_text("utf-8")
     for name in ("bankmon-collect.service", "bankmon-serve.service"):
         assert " -P -m bankmon " in _unit(name)["Service"]["ExecStart"][0]
     docs = (ROOT / "README.md").read_text("utf-8") + (ROOT / "docs" / "operacao.md").read_text("utf-8")

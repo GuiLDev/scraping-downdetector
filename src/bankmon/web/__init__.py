@@ -110,6 +110,11 @@ def create_app(
     def index():
         return render_template("index.html", **views.build_index(cfg, request.args, clock()))
 
+    @get_route("/painel/versao")
+    def versao():
+        # So o id/horario da ultima execucao (a pagina ja os reflete); sem token.
+        return jsonify({"versao": views.read_version(cfg)})
+
     @get_route("/history")
     def history():
         return render_template("history.html", **views.build_history(cfg, request.args, clock()))

@@ -730,3 +730,12 @@ def test_malformed_transition_timestamp_on_index_is_unreadable_not_500(history_c
     body = page(client_for(history_cfg))
     assert "Banco de dados ilegível" in body
     _no_green(body)
+
+
+def test_unreadable_snapshot_keeps_page_and_route_versions_equal(history_cfg):
+    """SEC-031: se o snapshot falha mas a ultima execucao e legivel, pagina e rota tem de bater
+    (senao o auto-recarregamento de 20 s entra em loop)."""
+    _corrupt(history_cfg, "UPDATE state_transitions SET changed_at = 'lixo'")
+    client = client_for(history_cfg)
+    versao = client.get("/painel/versao").get_json()["versao"]
+    assert f'data-versao="{versao}"' in page(client)

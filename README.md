@@ -48,8 +48,8 @@ Para os testes E2E (Playwright com o Edge instalado, `channel="msedge"`), instal
 
 | Comando | O que faz |
 |---|---|
-| `serve [--offline\|--navegador]` | Sobe o dashboard em `server.host:server.port` (padrão `127.0.0.1:8765`). `--navegador` liga a API da coleta pela aba do navegador. |
-| `extensao --alvo URL [--intervalo MIN]` | Gera a extensão do navegador pronta para carregar em `data/extensao-coletor/` (`--alvo` obrigatório, origem listada em `[coleta_navegador]`). |
+| `serve [--offline\|--navegador] [--abrir]` | Sobe o dashboard em `server.host:server.port` (padrão `127.0.0.1:8765`). `--navegador` liga a API da coleta pela aba do navegador. `--abrir` abre o dashboard no navegador padrão (só a URL de loopback do próprio servidor). Se a porta já estiver em uso, recusa com `Porta N já está em uso (outro BankMonitor aberto?)` (código de saída 1), em qualquer modo. |
+| `extensao --alvo URL [--intervalo MIN \| --pontual]` | Gera a extensão do navegador pronta para carregar em `data/extensao-coletor/` (`--alvo` obrigatório, origem listada em `[coleta_navegador]`). |
 | `init-db` | Cria o banco e sincroniza categorias e instituições a partir do TOML. |
 | `check-config` | Valida o TOML e mostra um resumo. Não cria banco nem logs. |
 | `collect [--trigger scheduled\|cli]` | Executa uma coleta com o coletor ativo e grava a execução, mesmo em caso de falha. Usa lock para não sobrepor execuções. |
@@ -110,6 +110,8 @@ Somente leitura, em `http://127.0.0.1:8765/`:
 - `/history`: histórico de transições e linha do tempo. Filtro de período: `24h`, `7d` ou `30d`.
 - `/institution/<id>`: detalhe de uma instituição, com o mesmo filtro de período.
 
+**Dashboard ao vivo.** A página `/` confere a cada 20 s, em `GET /painel/versao` (devolve só `{"versao": "<id>-<epoch>"}` da última execução, um identificador opaco, somente leitura, sem token e sem criar o banco), se há uma execução nova e só então recarrega; abas ocultas pulam a conferência. O `<meta refresh>` de 5 minutos continua como reserva (inclusive sem JavaScript).
+
 O servidor não tem JavaScript externo nem recursos de terceiros (bibliotecas e fontes ficam em `static/`, ver `static/VENDORED.md`).
 
 ### Validação offline (HTML exportado manualmente)
@@ -162,6 +164,28 @@ intervalo_minimo_local_s = 30                     # intervalo mínimo entre reca
 **API** (somente com `serve --navegador`; nos demais modos as rotas não existem): `POST /api/coleta/reserva`, `POST /api/coleta` e `GET /api/coleta/estado` exigem o cabeçalho `X-BankMonitor-Token`; `POST /coleta/retomar` usa token CSRF e recebe o campo `origem` (origem exata da lista, senão 403; vazio só vale com uma única origem configurada; origem externa recebe sempre 409). O token nunca é logado nem devolvido.
 
 **O que a extensão nunca faz:** ler ou enviar cookies, interagir com a página, resolver CAPTCHA ou desafio, abrir/ativar abas ou janelas. Veja os comentários de `extension/coletor/background.js`.
+
+### Leitura pontual com um clique (Windows)
+
+A leitura pontual é uma **decisão interna (D1), não uma autorização do serviço**: uma leitura do DOM já carregado na aba aberta por você, acionada manualmente, sem recarga, sem agendamento e sem requisição da extensão ao site. Toda coleta periódica ou automática continua exigindo autorização registrada. Detalhes em [`docs/etapa2-viabilidade-coletor.md`](docs/etapa2-viabilidade-coletor.md), seção "Leitura pontual — decisão interna".
+
+**Preparação (uma vez).** Crie `data\leitura-pontual\leitura.toml` (copie o seu TOML de instituições e acrescente a seção abaixo), gere a extensão com as mesmas `BANKMON_CONFIG`/`BANKMON_DATA_DIR` que o iniciador usa e carregue-a no navegador (página de extensões, modo desenvolvedor, "Carregar sem pacote", pasta `data\leitura-pontual\data\extensao-coletor\`):
+
+```toml
+[coleta_navegador]
+origens_autorizadas = ["https://downdetector.com.br"]
+leitura = "pontual"
+```
+
+```
+set BANKMON_CONFIG=%CD%\data\leitura-pontual\leitura.toml
+set BANKMON_DATA_DIR=%CD%\data\leitura-pontual\data
+.venv\Scripts\python -P -m bankmon extensao --pontual --alvo https://downdetector.com.br/
+```
+
+**Atalho.** Clique com o botão direito em `scripts\windows\iniciar-leitura-pontual.cmd` e escolha Enviar para, Área de trabalho (criar atalho).
+
+**Uso.** Dê duplo clique no iniciador (ele define as duas variáveis e roda `serve --navegador --abrir`; não gera a extensão, não lê o token e não abre o Downdetector). Abra você mesmo a aba `https://downdetector.com.br/` e espere carregar; clique no ícone da extensão "BankMonitor — Leitura Pontual" (ou rode `coletarAgora()` no console do service worker da extensão). A dashboard recarrega sozinha quando a leitura chega. **Feche a janela do iniciador ao terminar**: o servidor só deve ficar no ar durante a leitura (SEC-002). O Agendador de Tarefas não deve subir este ambiente.
 
 ## Agendamento
 

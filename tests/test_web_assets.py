@@ -72,8 +72,10 @@ def test_own_static_files_have_no_external_urls():
 
 def test_app_js_has_no_dynamic_code_or_html_injection():
     text = (STATIC / "app.js").read_text("utf-8")
-    for bad in ("eval(", "new Function", "innerHTML", "document.write", "fetch(", "XMLHttpRequest"):
+    for bad in ("eval(", "new Function", "innerHTML", "document.write", "XMLHttpRequest"):
         assert bad not in text, bad
+    # unico fetch permitido: a versao dos dados do proprio painel (mesma origem, so leitura)
+    assert text.count("fetch(") == 1 and 'fetch("/painel/versao"' in text
 
 
 def test_static_files_are_served_with_correct_types(tmp_path, monkeypatch):

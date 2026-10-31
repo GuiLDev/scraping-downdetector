@@ -34,4 +34,5 @@ bankmon = ["schema.sql", "web/templates/*.html", "web/static/**/*"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-m 'not e2e'"
-markers = ["e2e: testes com navegador real (Playwright + extensao); rode com -m e2e"]
+markers = ["e2e: testes com navegador real (Playwright + extensao); rode com -m e2e",
+           "real_port: usa a checagem real de porta ocupada do serve (sem o fixture que a desliga)"]

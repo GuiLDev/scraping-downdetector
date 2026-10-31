@@ -10,8 +10,11 @@ import argparse
 import dataclasses
 import hashlib
 import logging
+import socket
 import sqlite3
 import sys
+import threading
+import webbrowser
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from logging.handlers import RotatingFileHandler
@@ -240,12 +243,25 @@ def cmd_backup(cfg: Config, args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def port_in_use(host: str, port: int) -> bool:
+    """True se ja ha alguem escutando em host:port (waitress usa SO_REUSEADDR e, no Windows,
+    dois `serve` poderiam dividir a mesma porta)."""
+    try:
+        with socket.create_connection((host, port), timeout=0.5):
+            return True
+    except OSError:
+        return False
+
+
 def cmd_serve(cfg: Config, args: argparse.Namespace) -> int:
     """Sobe o dashboard (waitress) em cfg.host:cfg.port (loopback validado em load_config)."""
     import waitress
 
     from bankmon.web import collect_api, create_app
 
+    if port_in_use(cfg.host, cfg.port):  # antes de migrar o banco ou criar o token
+        print(f"Porta {cfg.port} já está em uso (outro BankMonitor aberto?)", file=sys.stderr)
+        return EXIT_FAIL
     clock = utc_now
     api_kwargs: dict = {}
     if getattr(args, "navegador", False):
@@ -266,7 +282,12 @@ def cmd_serve(cfg: Config, args: argparse.Namespace) -> int:
         clock = lambda: frozen  # noqa: E731 - estados como na captura, nao "vencidos"
         print(OFFLINE_WARNING)
     host = f"[{cfg.host}]" if ":" in cfg.host else cfg.host  # IPv6 literal na URL
-    print(f"Dashboard em http://{host}:{cfg.port}/  (Ctrl+C para encerrar)", flush=True)
+    url = f"http://{host}:{cfg.port}/"
+    print(f"Dashboard em {url}  (Ctrl+C para encerrar)", flush=True)
+    if getattr(args, "abrir", False):  # so a URL de loopback do proprio servidor, nunca o Downdetector
+        opener = threading.Timer(1.0, webbrowser.open, [url])
+        opener.daemon = True
+        opener.start()
     waitress.serve(
         create_app(cfg, clock, **api_kwargs), host=cfg.host, port=cfg.port, threads=4,
         max_request_body_size=collect_api.MAX_BODY_BYTES,
@@ -282,7 +303,7 @@ def cmd_extensao(cfg: Config, args: argparse.Namespace) -> int:
         return EXIT_FAIL
     print(f"Extensão gerada em {folder}")
     interval = (
-        "modo: leitura pontual (acione com coletarAgora())"
+        "modo: leitura pontual (acione com um clique no ícone da extensão ou coletarAgora())"
         if args.pontual else f"intervalo: {args.intervalo or extension.DEFAULT_INTERVAL_MIN:g} min"
     )
     print(f"  alvo: {safe_text(args.alvo)}  {interval}  servidor: {extension.server_url(cfg)}")
@@ -389,6 +410,7 @@ def build_parser() -> argparse.ArgumentParser:
     mode = serve.add_mutually_exclusive_group()
     mode.add_argument("--offline", action="store_true", help="usa o banco de validação offline")
     mode.add_argument("--navegador", action="store_true", help="liga a API da coleta pela aba do navegador")
+    serve.add_argument("--abrir", action="store_true", help="abre o dashboard no navegador padrão (só a URL local)")
     ext = sub.add_parser("extensao", help="gera a extensão do navegador em data/extensao-coletor/")
     ext.add_argument("--alvo", required=True, help="URL da aba a ler (origem listada em [coleta_navegador])")
     ext.add_argument("--intervalo", type=float, default=None, metavar="MIN",

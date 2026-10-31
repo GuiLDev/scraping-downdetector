@@ -429,3 +429,57 @@ def test_rendered_pages_have_no_external_urls_or_inline_scripts(seeded):
 
 def test_repeated_filter_param_uses_first_value_only(seeded):
     assert names_in_order(page(client_for(seeded), "/?state=critical&state=attention")) == ["Banco Alfa"]
+
+
+# --- Versao dos dados (dashboard ao vivo) -------------------------------------
+
+
+def test_versao_route_returns_json_and_changes_with_new_run(cfg):
+    add_run(cfg, NOW - 10 * MIN, LEVELS)
+    client = client_for(cfg)
+    resp = client.get("/painel/versao")
+    assert resp.status_code == 200 and resp.is_json
+    first = resp.get_json()["versao"]
+    assert first and ":" not in first  # opaca ("id-epoch"): nenhum HH:MM em UTC no HTML
+    assert client.get("/painel/versao").get_json()["versao"] == first
+    add_run(cfg, NOW - 5 * MIN, LEVELS)
+    assert client.get("/painel/versao").get_json()["versao"] != first
+
+
+@pytest.mark.parametrize("method", ["post", "put", "delete", "patch", "options"])
+def test_versao_route_rejects_other_methods(seeded, method):
+    assert getattr(client_for(seeded), method)("/painel/versao").status_code == 405
+
+
+def test_versao_route_has_same_security_headers(seeded):
+    client = client_for(seeded)
+    resp = client.get("/painel/versao")
+    ref = client.get("/")
+    for name in (
+        "Content-Security-Policy", "X-Content-Type-Options", "Referrer-Policy", "X-Frame-Options",
+        "Cross-Origin-Resource-Policy", "Cross-Origin-Opener-Policy", "Cache-Control",
+    ):
+        assert resp.headers[name] == ref.headers[name], name
+    assert resp.headers["Cache-Control"] == "no-store"
+
+
+def test_versao_route_missing_database_is_empty_and_not_created(cfg):
+    assert not cfg.db_path.exists()
+    resp = client_for(cfg).get("/painel/versao")
+    assert resp.status_code == 200 and resp.get_json() == {"versao": ""}
+    assert not cfg.db_path.exists()
+
+
+def test_index_carries_same_version_as_route(seeded):
+    client = client_for(seeded)
+    versao = client.get("/painel/versao").get_json()["versao"]
+    assert f'data-versao="{versao}"' in page(client)
+
+
+def test_index_without_database_has_empty_version(cfg):
+    assert 'data-versao=""' in page(client_for(cfg))
+
+
+def test_footer_mentions_live_reload(seeded):
+    html = page(client_for(seeded))
+    assert "Recarrega sozinha quando chega uma leitura nova" in html

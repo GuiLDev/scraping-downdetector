@@ -391,6 +391,23 @@ def _card_view(cfg: Config, card: status.Card, snap: Snapshot, now: datetime, de
     }
 
 
+def run_version(run: RunView | None) -> str:
+    """Identificador opaco da execucao mais recente ("id-epoch"); vazio sem execucao.
+    Sem horario legivel: um HH:MM em UTC no HTML confundiria (ver test_utc_hour_never_leaks_into_display)."""
+    return f"{run.run_id}-{int(run.finished_at.timestamp())}" if run is not None else ""
+
+
+def data_version(conn: sqlite3.Connection) -> str:
+    """Versao dos dados exibidos: muda quando entra uma execucao nova."""
+    return run_version(db.latest_run(conn))
+
+
+def read_version(cfg: Config) -> str:
+    """Versao para o auto-recarregamento; banco ausente/ilegivel -> "" (nunca cria o banco)."""
+    state, version = read_db(cfg, data_version)
+    return version if state == "ok" and isinstance(version, str) else ""
+
+
 def build_index(cfg: Config, args, now: datetime) -> dict:
     snap = load_snapshot(cfg)
     stale_after = timedelta(minutes=cfg.stale_after_minutes)
@@ -433,6 +450,8 @@ def build_index(cfg: Config, args, now: datetime) -> dict:
     notices[0:0] = coleta_notices(cfg, snap)
     return {
         "demo": demo,
+        # mesma fonte da rota /painel/versao: snapshot ilegivel nao pode gerar recarga em loop (SEC-031)
+        "versao": run_version(latest) if snap.db_state == "ok" else read_version(cfg),
         "offline_banner": offline_banner(cfg, snap),
         "notices": notices,
         # um botao por origem retomavel (externa suspensa nunca entra); o nome so aparece com varias

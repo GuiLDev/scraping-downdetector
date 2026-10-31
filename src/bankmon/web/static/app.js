@@ -153,6 +153,25 @@
     if (tc && td) { timelineChart(tc, td); }
   }
 
+  // --- Recarrega quando chega leitura nova (so no painel, que tem data-versao) -----
+  function initAutoReload() {
+    var el = document.querySelector("[data-versao]");
+    if (!el) { return; }
+    var inicial = el.getAttribute("data-versao");
+    window.setInterval(function () {
+      if (document.hidden) { return; }
+      fetch("/painel/versao", { cache: "no-store", credentials: "same-origin" })
+        .then(function (r) { return r.ok ? r.json() : null; })
+        .then(function (data) {
+          if (data && typeof data.versao === "string" && data.versao !== inicial) {
+            window.location.reload();
+          }
+        })
+        .catch(function () { /* ignora: tenta de novo no proximo ciclo */ });
+    }, 20000);
+  }
+
   initTheme();
   initCharts();
+  initAutoReload();
 })();

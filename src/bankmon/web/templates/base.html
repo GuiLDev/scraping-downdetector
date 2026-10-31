@@ -34,7 +34,7 @@
     {% block content %}{% endblock %}
   </main>
   <footer class="container">
-    <small>Atualização automática a cada 5 minutos. Horários em America/Sao_Paulo.</small>
+    <small>Recarrega sozinha quando chega uma leitura nova (confere a cada 20 s) e a cada 5 minutos. Horários em America/Sao_Paulo.</small>
   </footer>
   {% block scripts %}{% endblock %}
   <script src="{{ url_for('static', filename='app.js') }}"></script>

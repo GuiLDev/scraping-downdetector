@@ -145,6 +145,15 @@ def test_normal_extension_config_has_no_pontual_flag(toml, capsys):
     assert run(["extensao", "--alvo", "http://127.0.0.1:8777/dd"], capsys)[0] == EXIT_OK
     conf, manifest = generated(cfg)
     assert "pontual" not in conf and manifest["name"] == "BankMonitor — Coleta Automática"
+    assert "action" not in manifest  # sem `action` nao existe `chrome.action` (nenhum clique)
+
+
+def test_pontual_manifest_has_an_action_for_the_icon_click_and_no_new_permission(toml, capsys):
+    cfg = toml(section([EXT]))
+    assert run(["extensao", "--pontual", "--alvo", EXT_URL], capsys)[0] == EXIT_OK
+    _, manifest = generated(cfg)
+    assert manifest["action"] == {"default_title": "BankMonitor: ler agora a aba do alvo (leitura pontual)"}
+    assert manifest["permissions"] == ["scripting", "storage"]
 
 
 # --- API com config pontual -------------------------------------------------------------------------

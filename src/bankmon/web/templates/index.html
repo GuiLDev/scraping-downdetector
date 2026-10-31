@@ -2,6 +2,7 @@
 {% from "_macros.html" import state_badge, demo_badge %}
 {% block title %}Painel{% endblock %}
 {% block content %}
+<div data-versao="{{ versao }}">
 {% if csrf_token is defined %}
 {% for origem in resume_origins %}
 <form class="resume-form" method="post" action="{{ url_for('resume_collection') }}">
@@ -71,4 +72,5 @@
   {% endfor %}
 </section>
 {% endfor %}
+</div>
 {% endblock %}

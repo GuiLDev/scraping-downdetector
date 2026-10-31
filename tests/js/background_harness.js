@@ -90,7 +90,7 @@ async function fakeFetch(url, opts = {}) {
 
 const context = {
   chrome, fetch: fakeFetch, console: { log() {}, warn() {}, error() {} }, URL, TextEncoder, JSON, Math, Promise,
-  Date: { now: () => clock },
+  Date: class extends Date { static now() { return clock; } }, // `new Date()` real, `Date.now()` virtual
   // Relogio virtual: esperas curtas (<10 s) disparam logo; o limite longo de carregamento dispara so
   // depois de varios ciclos (dando chance ao evento `complete`) e entao avanca o relogio.
   setTimeout: (fn, ms) => {
@@ -108,6 +108,19 @@ const context = {
   globalThis: null,
 };
 context.globalThis = context;
+// Extensao pontual real: sem a permissao "alarms" nao existe `chrome.alarms`.
+if (sc.noAlarms) delete chrome.alarms;
+// `chrome.action` so existe quando o manifest tem a chave `action` (extensao pontual).
+if (sc.withAction) {
+  report.badges = [];
+  report.titles = [];
+  report.clickListeners = 0;
+  chrome.action = {
+    onClicked: { addListener: (fn) => { report.clickListeners++; report.clickHandler = fn; } },
+    setBadgeText: async ({ text }) => { report.badges.push(text); },
+    setTitle: async ({ title }) => { report.titles.push(title); },
+  };
+}
 vm.createContext(context);
 vm.runInContext(fs.readFileSync(scriptPath, "utf8"), context);
 
@@ -122,6 +135,10 @@ vm.runInContext(fs.readFileSync(scriptPath, "utf8"), context);
       report.alarmHandler({ name: "bankmon-coleta" });
       await new Promise((r) => setTimeout(r, 0));
       for (let i = 0; i < 200; i++) await new Promise((r) => setImmediate(r));
+    } else if (sc.mode === "click") {
+      for (let i = 0; i < 5; i++) await new Promise((r) => setImmediate(r)); // garantirAlarme inicial
+      report.hasClickHandler = typeof report.clickHandler === "function";
+      if (report.hasClickHandler) await report.clickHandler({ id: 1 });
     } else {
       report.result = await context.coletarAgora();
     }

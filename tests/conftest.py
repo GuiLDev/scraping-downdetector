@@ -92,6 +92,14 @@ def _restore_bankmon_logging():
 
 
 @pytest.fixture(autouse=True)
+def _port_free(request, monkeypatch):
+    """`serve` recusa porta ocupada; os testes com waitress falsa nao dependem da porta real.
+    Testes da checagem real usam @pytest.mark.real_port."""
+    if "real_port" not in request.keywords:
+        monkeypatch.setattr("bankmon.cli.port_in_use", lambda host, port: False)
+
+
+@pytest.fixture(autouse=True)
 def _fixed_runner_clock(monkeypatch):
     """Relogio do runner fixo logo apos T0: os coletores falsos usam T0 + offsets e o runner
     rejeita `finished_at` no futuro. Testes que precisam de outro relogio sobrescrevem."""

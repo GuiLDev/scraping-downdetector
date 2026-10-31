@@ -10,7 +10,9 @@
 //
 // MODO PONTUAL (`pontual: true` em config.json): NAO ha alarme. So `coletarAgora()`, acionado a mao
 // pelo responsavel, faz UMA leitura: consulta o estado, reserva a vaga e le o DOM que a aba JA mostra
-// (sem recarregar), enviando-o com o `reserva_id` e `modo: "pontual"`.
+// (sem recarregar), enviando-o com o `reserva_id` e `modo: "pontual"`. O acionamento manual e o CLIQUE NO
+// ICONE da extensao (o manifesto pontual tem `action`) ou `coletarAgora()` no console; o resultado
+// aparece no selo do icone. Nada dispara sozinho.
 //
 // O QUE NUNCA FAZ (proibicoes deliberadas; nao as remova):
 //  - nao le, copia nem envia cookies, storage da pagina, cabecalhos ou credenciais (sem permissao
@@ -258,7 +260,47 @@ async function aoAlarme(alarme) {
   coletarAgora();
 }
 
+// Selo do icone (so existe com `action` no manifesto, ou seja, so na extensao pontual).
+const TITULO_ACAO = "BankMonitor: ler agora a aba do alvo (leitura pontual)";
+
+function seloDoResultado(r) {
+  if (r.resultado === "enviado" && r.http === 200) return "OK";
+  if (r.resultado === "intervalo") return "60m";
+  if (r.resultado === "sem_aba") return "ABA";
+  return "ERR";
+}
+
+function textoDoResultado(r) {
+  const hora = new Date().toTimeString().slice(0, 5);
+  const detalhe = r.resultado === "enviado" ? "enviado (" + r.http + ")" : r.resultado;
+  return TITULO_ACAO + " — ultimo: " + detalhe + " as " + hora; // nunca token nem HTML
+}
+
+async function mostrarSelo(texto, titulo) {
+  try {
+    await chrome.action.setBadgeText({ text: texto });
+    if (titulo) await chrome.action.setTitle({ title: titulo });
+  } catch (_) {
+    /* selo e opcional */
+  }
+}
+
+// Clique no icone = acionamento manual de UMA leitura pontual. Ignorado se a config nao for pontual.
+async function aoClicar() {
+  let cfg;
+  try {
+    cfg = await carregarConfig();
+  } catch (_) {
+    return;
+  }
+  if (!cfg.pontual) return;
+  await mostrarSelo("...");
+  const r = await coletarAgora();
+  await mostrarSelo(seloDoResultado(r), textoDoResultado(r));
+}
+
 if (chrome.alarms) chrome.alarms.onAlarm.addListener(aoAlarme);
+if (chrome.action) chrome.action.onClicked.addListener(aoClicar);
 chrome.runtime.onInstalled.addListener(() => garantirAlarme());
 chrome.runtime.onStartup.addListener(() => garantirAlarme());
 garantirAlarme().catch(() => {}); // o service worker pode acordar sem onInstalled/onStartup
